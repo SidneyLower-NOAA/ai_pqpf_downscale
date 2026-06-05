@@ -29,6 +29,8 @@ def worker_fn(rank: int, world_size: int, os_vars: list, collate_outputs: torch.
 
     
     ### load trained model weights
+    if rank == 1:
+        print("... Loading downscale model and setting weights")
     model_name = 'PQPF_downscale_model_trained_state'
     saved_state = torch.load(f"{FIXblend}/AI/precip/{model_name}.pth", map_location='cpu')
     in_channels = saved_state['model_args']['in_channels']
@@ -38,6 +40,8 @@ def worker_fn(rank: int, world_size: int, os_vars: list, collate_outputs: torch.
     downscale_model.load_state_dict(saved_state['model_state_dict'])
 
     ### process data
+    if rank == 1:
+        print("... Loading data")
     input_data_tensors = load_qpf_data(DATA_IN, percentiles=percentiles, data_format=data_format)
     sampler = DistributedSampler(input_data_tensors, num_replicas=world_size, rank=rank, shuffle=False)
     input_data_loader = torch.utils.data.DataLoader(input_data_tensors, batch_size=batch_size, sampler=sampler, num_workers=0)
@@ -245,6 +249,9 @@ if __name__ == "__main__":
     # run model in parallel
     collate_outputs = torch.zeros((len(percentiles), 1, ny, nx))
 
+    collate_outputs.share_memory_()
+
+    print(" SENDING DATA TO MULTIPROCESSING WORKERS")
     mp.spawn(
         worker_fn,
         args=(model_threads,os_vars, collate_outputs),
