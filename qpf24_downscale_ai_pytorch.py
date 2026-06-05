@@ -10,9 +10,11 @@ from qpf24_downscale_ai_pytorch_utils import load_qpf_data, init_model
 
 def run_downscale_model(input_tensors, initialized_downscale_model, batch_size=2, io_threads=4):
 
+    print("in run func")
     collate_outputs = np.zeros((len(input_data_tensors), ny, nx)) # n percentiles, hires output, ny, nx
     collate_percentiles = []
 
+    print("torch data loader")
     input_data_loader = torch.utils.data.DataLoader(
         input_data_tensors,
         batch_size=batch_size,
@@ -20,12 +22,12 @@ def run_downscale_model(input_tensors, initialized_downscale_model, batch_size=2
         num_workers=io_threads
     )
 
-    
+    print('setting model to eval')
     downscale_model.eval() 
     with torch.no_grad(): 
         ncount = 0
         for low_res_input, time_vector, grid20, percentile in input_data_loader:
-            
+            print(f'on batch {ncount//2 + 1}')
             output_batch = initialized_downscale_model(low_res_input, time_vector)
     
             collate_percentiles.extend(percentile.tolist())
