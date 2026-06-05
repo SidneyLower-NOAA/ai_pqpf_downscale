@@ -1,44 +1,66 @@
 import pandas as pd
 import numpy as np
 import xarray as xr
-import torch
 from scipy import signal
+
+import torch
+import torch.multiprocessing as mp
+import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
+
 import sys
 import os
 
 from qpf24_downscale_ai_pytorch_utils import load_qpf_data, init_model
 
-def run_downscale_model(input_tensors, initialized_downscale_model, batch_size=2, io_threads=4):
 
-    print("in run func")
-    collate_outputs = np.zeros((len(input_data_tensors), ny, nx)) # n percentiles, hires output, ny, nx
-    collate_percentiles = []
 
-    print("torch data loader")
-    input_data_loader = torch.utils.data.DataLoader(
-        input_data_tensors,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=io_threads
-    )
 
-    print('setting model to eval')
+
+def worker_fn(rank: int, world_size: int, os_vars: list, collate_outputs: torch.tensor):
+
+    FIXblend, DATA_IN, data_format, percentiles, (ny, nx), batch_size = os_vars
+    
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+    ### important! no multi-threading
+    torch.set_num_threads(1)
+
+    
+    ### load trained model weights
+    model_name = 'PQPF_downscale_model_trained_state'
+    saved_state = torch.load(f"{FIXblend}/AI/precip/{model_name}.pth", map_location='cpu')
+    in_channels = saved_state['model_args']['in_channels']
+    features = saved_state['model_args']['n_features_max']
+    n_conv_layers = saved_state['model_args']['n_conv_layers']
+    downscale_model = init_model(grid_dims=(ny, nx),in_channels=in_channels,features=features,n_conv_layers=n_conv_layers)
+    downscale_model.load_state_dict(saved_state['model_state_dict'])
+
+    ### process data
+    input_data_tensors = load_qpf_data(DATA_IN, percentiles=percentiles, data_format=data_format)
+    sampler = DistributedSampler(input_data_tensors, num_replicas=world_size, rank=rank, shuffle=False)
+    input_data_loader = torch.utils.data.DataLoader(input_data_tensors, batch_size=batch_size, sampler=sampler, num_workers=0)
+
+    print(f"     RANK {rank} handling {len(input_data_loader)} percentiles")
+
+    ### run inference
     downscale_model.eval() 
     with torch.no_grad(): 
         ncount = 0
         for low_res_input, time_vector, grid20, percentile in input_data_loader:
-            print(f'on batch {ncount//2 + 1}')
-            output_batch = initialized_downscale_model(low_res_input, time_vector)
-    
-            collate_percentiles.extend(percentile.tolist())
+
+            output_batch = downscale_model(low_res_input, time_vector)
+
+            per_list = percentile.tolist()
             for out in range(len(output_batch)):
-                collate_outputs[ncount] = np.expm1(output_batch[out].squeeze(0).squeeze(0).numpy()) * grid20[out].numpy()
+                collate_outputs[per_list[out]] = torch.expm1(output_batch[out].squeeze(0).squeeze(0)) * grid20[out]
                 ncount += 1
-            batch_count = ncount // 2
-            print(f"     ... batch {batch_count} / {len(input_data_loader)}")
+                print(f"     RANK {rank}: grid {ncount} / {len(input_data_loader)}")
+            
+    dist.destroy_process_group()
 
-    return collate_outputs, np.array(collate_percentiles)
-
+    return
 
 
 # Smoothing (stolen from Eric) :)
@@ -199,9 +221,7 @@ if __name__ == "__main__":
     # set threads
     TOTAL_THREAD = int(os.environ["NTHREAD"]) - 2
     batch_size = 2
-    io_threads = TOTAL_THREAD // 4
-    model_threads = TOTAL_THREAD - io_threads
-    torch.set_num_threads(model_threads)
+    model_threads = TOTAL_THREAD
 
     print(" SCRIPT ARGS: ")
     print(f"              LEAD TIME: {LEAD_TIME}")
@@ -209,52 +229,33 @@ if __name__ == "__main__":
     print(f"              INPUT DATA: {DATA_IN}")
     print(f"              OUTPUT FILE: {output_file}")
     print(f"              SMOOTHING?: {sm_v}")
-    print(f"              NTHREADS FOR UNET: {torch.get_num_threads()}")
-    
-    ### ------------------------- ###
-    ###  Load & Process Data
-    ### -------------------------- ###
-    
-    percentiles = np.array([5,10,20,25,30,40,50,60,70,75,80,90,95])
-    
-    print("... Loading data")
-    print(f"       Percentiles: ({len(percentiles)}): {percentiles}")
-    input_data_tensors = load_qpf_data(DATA_IN, percentiles=percentiles, data_format=data_format)
-    
-    ### ------------------------- ###
-    ###  Initialize Model
-    ### -------------------------- ###
+    print(f"              NCPUS FOR UNET: {model_threads}")
     
     # get 2.5km grid
     CONST_FILE=FIXblend+'/precip/blend.precip_const.co.2p5.nc'
     with xr.open_dataset(CONST_FILE) as temp:
         latitude = temp.latitude.values
         longitude = temp.longitude.values
+    
+    # runtime consts
+    percentiles = np.array([5,10,20,25,30,40,50,60,70,75,80,90,95])
     ny, nx = np.shape(longitude) 
-    
-    print("... Loading model")
-    ### load trained model weights
-    model_name = 'PQPF_downscale_model_trained_state'
-    saved_state = torch.load(f"{FIXai}/{model_name}.pth", map_location=torch.device('cpu'))
-    
-    in_channels = saved_state['model_args']['in_channels']
-    features = saved_state['model_args']['n_features_max']
-    n_conv_layers = saved_state['model_args']['n_conv_layers']
-    
-    downscale_model = init_model(grid_dims=(ny, nx),in_channels=in_channels,features=features,n_conv_layers=n_conv_layers)
-    downscale_model.load_state_dict(saved_state['model_state_dict'])
-    
-    ### ------------------------- ###
-    ###  Run Model
-    ### -------------------------- ###
-    print("... Running model")
-    downscaled_outputs, sorted_percentiles = run_downscale_model(input_data_tensors, downscale_model, batch_size, io_threads)
-            
-    ### ------------------------- ###
+    os_vars = [FIXblend, DATA_IN, data_format, percentiles, (ny, nx), batch_size]
+
+    # run model in parallel
+    collate_outputs = torch.zeros((len(percentiles), 1, ny, nx))
+
+    mp.spawn(
+        worker_fn,
+        args=(model_threads,os_vars, collate_outputs),
+        nprocs=model_threads,
+        join=True
+    )
+
+
     ###  Save to zarr
-    ### -------------------------- ###
     print("... Saving data")
-    write_high_res_ds(downscaled_outputs, sorted_percentiles, latitude, longitude, refDate, LEAD_TIME, output_file, SMOOTHING)
+    write_high_res_ds(collate_outputs, percentiles, latitude, longitude, refDate, LEAD_TIME, output_file, SMOOTHING)
     print(f"... Finished writing Zarr: {output_file}")
 
     
