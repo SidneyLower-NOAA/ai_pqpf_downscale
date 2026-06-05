@@ -42,8 +42,7 @@ export USHblend=${USHblend:-${HOMEblend}/ush}
 ########################################
 export cyc="00"
 export cycle=${cycle:-t${cyc}z}
-setpdy.sh 12 1
-. ./PDY
+export PDY=$(date -d "yesterday" '+%Y%m%d')
 echo $PDY
 
 LEAD_TIME=$1
@@ -64,6 +63,8 @@ export PBS_OUTPUTFILE=$logfile
 export COMOUT_TEST=/lfs/h3/mdl/nbm/noscrub/sidney.lower/downscale_model_dev/test_output/
 mkdir $COMOUT_TEST
 export COMOUT=$COMOUT_TEST
+
+export NTHREAD=30
 
 python $USHblend/qpf24_downscale_ai_pytorch.py $LEAD_TIME 
 

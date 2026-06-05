@@ -197,7 +197,7 @@ if __name__ == "__main__":
     print("-" * 60)
     print(" SCRIPT ARGS: ")
     print(f"              LEAD TIME: {LEAD_TIME}")
-    print(f"              REF DATE: {pd.to_datetime(PDY, format='%Y%m%d%H')}")
+    print(f"              REF DATE: {pd.to_datetime(PDY+cyc, format='%Y%m%d%H')}")
     print(f"              INPUT DATA: {DATA_IN}")
     print(f"              OUTPUT FILE: {output_file}")
     print(f"              SMOOTHING?: {sm_v}")
@@ -254,7 +254,7 @@ if __name__ == "__main__":
     ### ------------------------- ###
     ###  Save to zarr
     ### -------------------------- ###
-    ref_date = pd.to_datetime(PDY, format='%Y%m%d%H')
+    ref_date = pd.to_datetime(PDY+cyc, format='%Y%m%d%H')
     print("... Saving data")
     write_high_res_ds(downscaled_outputs, sorted_percentiles, latitude, longitude, ref_date, LEAD_TIME, output_file, SMOOTHING)
     print(f"... Finished writing Zarr: {output_file}")
