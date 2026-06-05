@@ -3,15 +3,35 @@ import numpy as np
 import torch
 import torch.nn as nn
 import xarray as xr
+import grib2io
 import os
-from scipy import signal
+from contextlib import contextmanager, redirect_stdout
 
 ### ------------------------- ###
 ###  Process Data for Input
 ### -------------------------- ###
 
+@contextmanager
+def suppress_stdout():
+    # Open devnull to send output into the void
+    with open(os.devnull, 'w') as devnull:
+        old_stdout_fd = os.dup(1)
+        try:
+            # Redirect Python's stdout
+            with redirect_stdout(devnull):
+                # Redirect stdout to devnull
+                os.dup2(devnull.fileno(), 1)
+                yield
+        finally:
+            # Restore the original file descriptor
+            os.dup2(old_stdout_fd, 1)
+            os.close(old_stdout_fd)
+
 class load_qpf_data(torch.utils.data.Dataset):
     def __init__(self, data_path: str, percentiles: np.array, data_format: str):
+
+        FIXblend=os.getenv("FIXblend")
+        FIXai = FIXblend+"/AI/precip/"
 
         self.data_file = data_path
         self.data_format = data_format
@@ -23,28 +43,36 @@ class load_qpf_data(torch.utils.data.Dataset):
         self.n_samples = len(percentiles)
         self.percentiles = percentiles
 
-        utils_path=os.environ["USHblend"]+"/downscale_model/"
         # stats for normalizing wrt training data
         qpe_stats = xr.open_dataset(
-            utils_path+"downscaling_training_stats.nc"
+            FIXai+"downscaling_training_stats_for_normalization.nc"
         ).load()
         self.precip_mean = qpe_stats.mean_log_precip.values
         self.precip_std = qpe_stats.std_log_precip.values
 
         # Process LOW RES terrain features
         terrain_file = (
-            utils_path+"upsampled_terrain20km.nc"
+            FIXai+"terrain_20km_nml_to.nc"
         )
         ds_topo_data = xr.open_dataset(terrain_file).load()
+        # regrid onto 2.5km grid
+        with suppress_stdout():
+            grid2p5=grib2io.open(f'{FIXai}/hiresw.t00z.arw_2p5km_one_message.grib2')
+            grid20=grib2io.open(f'{FIXai}/hiresw.t00z.fv3_20km_one_message.grib2')
+            grid_out20 = grib2io.Grib2GridDef.from_section3(grid20[0].section3)
+            grid_out2p5 = grib2io.Grib2GridDef.from_section3(grid2p5[0].section3)
+            ds_topo_data.nml_terrain_20km.attrs["GRIB2IO_section3"] = grid20[0].section3
+            interp_terrain = ds_topo_data.nml_terrain_20km.grib2io.interp("budget", grid_out2p5, num_threads=1)
+        
         terrain_tensor = (
-            torch.from_numpy(np.nan_to_num(ds_topo_data.terrain20km.values, 0.0))
+            torch.from_numpy(np.nan_to_num(interp_terrain.values, 0.0))
             .float()
             .unsqueeze(0)
         )
         lowres_features = terrain_tensor  # torch.cat([terrain_tensor], dim=0)
 
         # Process HIGH RES terrain features
-        terrain_file = utils_path+"terrain_2p5km_nml_to.nc"
+        terrain_file = FIXai+"terrain_2p5km_nml_to.nc"
         ds_topo_data = xr.open_dataset(terrain_file).load()
         terrain_tensor = (
             torch.from_numpy(np.nan_to_num(ds_topo_data.nml_terrain_2p5km.values, 0.0))
@@ -111,128 +139,6 @@ class load_qpf_data(torch.utils.data.Dataset):
         )
 
         return combined_features, time_vector, interp20_to_2p5, percentile
-
-### ------------------------- ###
-###    Smoothing (stolen from Eric) :)
-### -------------------------- ###
-
-def sgolay2d (z, window_size, order):
-    """
-    Apply a Savitsky-Golay filter to a 2D array.
-    """
-    # number of terms in the polynomial expression
-    n_terms = ( order + 1 ) * ( order + 2)  / 2.0
-
-    if  window_size % 2 == 0:
-        raise ValueError('window_size must be odd')
-
-    if window_size**2 < n_terms:
-        raise ValueError('order is too high for the window size')
-
-    half_size = window_size // 2
-
-    # exponents of the polynomial.
-    # p(x,y) = a0 + a1*x + a2*y + a3*x^2 + a4*y^2 + a5*x*y + ...
-    # this line gives a list of two item tuple. Each tuple contains
-    # the exponents of the k-th term. First element of tuple is for x
-    # second element for y.
-    # Ex. exps = [(0,0), (1,0), (0,1), (2,0), (1,1), (0,2), ...]
-    exps = [ (k-n, n) for k in range(order+1) for n in range(k+1) ]
-
-    # coordinates of points
-    ind = np.arange(-half_size, half_size+1, dtype=np.float32)
-    dx = np.repeat( ind, window_size )
-    dy = np.tile( ind, [window_size, 1]).reshape(window_size**2, )
-
-    # build matrix of system of equation
-    A = np.empty( (window_size**2, len(exps)) )
-    for i, exp in enumerate( exps ):
-        A[:,i] = (dx**exp[0]) * (dy**exp[1])
-
-    # pad input array with appropriate values at the four borders
-    new_shape = z.shape[0] + 2*half_size, z.shape[1] + 2*half_size
-    Z = np.zeros( (new_shape) )
-    # top band
-    band = z[0, :]
-    Z[:half_size, half_size:-half_size] =  band -  np.abs( np.flipud( z[1:half_size+1, :] ) - band )
-    # bottom band
-    band = z[-1, :]
-    Z[-half_size:, half_size:-half_size] = band  + np.abs( np.flipud( z[-half_size-1:-1, :] )  -band )
-    # left band
-    band = np.tile( z[:,0].reshape(-1,1), [1,half_size])
-    Z[half_size:-half_size, :half_size] = band - np.abs( np.fliplr( z[:, 1:half_size+1] ) - band )
-    # right band
-    band = np.tile( z[:,-1].reshape(-1,1), [1,half_size] )
-    Z[half_size:-half_size, -half_size:] =  band + np.abs( np.fliplr( z[:, -half_size-1:-1] ) - band )
-    # central band
-    Z[half_size:-half_size, half_size:-half_size] = z
-
-    # top left corner
-    band = z[0,0]
-    Z[:half_size,:half_size] = band - np.abs( np.flipud(np.fliplr(z[1:half_size+1,1:half_size+1]) ) - band )
-    # bottom right corner
-    band = z[-1,-1]
-    Z[-half_size:,-half_size:] = band + np.abs( np.flipud(np.fliplr(z[-half_size-1:-1,-half_size-1:-1]) ) - band )
-
-    # top right corner
-    band = Z[half_size,-half_size:]
-    Z[:half_size,-half_size:] = band - np.abs( np.flipud(Z[half_size+1:2*half_size+1,-half_size:]) - band )
-    # bottom left corner
-    band = Z[-half_size:,half_size].reshape(-1,1)
-    Z[-half_size:,:half_size] = band - np.abs( np.fliplr(Z[-half_size:, half_size+1:2*half_size+1]) - band )
-
-    # solve system and convolve
-    m = np.linalg.pinv(A)[0].reshape((window_size, -1))
-    return signal.fftconvolve(Z, m, mode='valid')
-
-### ------------------------- ###
-###  Write out to Zarr
-### -------------------------- ###
-
-def write_high_res_ds(
-    hires_output, percentiles, latitude, longitude, ref_date, lead_time, output_file, SMOOTHING,
-):
-
-    sort_idx = percentiles.argsort()
-
-    # deal with datetime stuff
-    leadTime = pd.Timedelta(hours=lead_time)
-    refDate = ref_date
-    validDate = ref_date + leadTime
-
-    # sort data arrays
-    output_sorted = hires_output[sort_idx]
-    percentiles_sorted = percentiles[sort_idx]
-
-    # OPTIONAL SMOOTHING
-    if SMOOTHING:
-        print(" ***** APPLYING SG SMOOTHING TO OUTPUT ***** ")
-        output_smoothed = np.zeros_like(output_sorted)
-        for grid in range(len(percentiles)):
-            output_smoothed[grid] = sgolay2d(output_sorted[grid], 25, 3)
-    else:
-        output_smoothed = output_sorted
-
-    # write out
-    da = xr.DataArray(
-                    data=output_smoothed,
-                    dims=["percentiles", "y", "x"],
-                    coords=dict(
-                            refDate=refDate,
-                            validDate=validDate,
-                            leadTime=leadTime,
-                            duration=pd.Timedelta(hours=24),
-                            latitude=(["y", "x"],latitude),
-                            longitude=(["y", "x"],longitude),
-                            percentiles=(['percentiles'], percentiles_sorted)
-                        )
-                    )
-
-    da.name = 'pqpf24_percentile_prediction'
-    da.to_zarr(output_file, mode="w")
-    print(f"... Finished writing Zarr: {output_file}")
-    return
-
 
 
 """

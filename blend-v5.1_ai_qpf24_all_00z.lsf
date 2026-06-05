@@ -255,7 +255,7 @@ export logfile=$LOGblend/${job}.out
 export PBS_OUTPUTFILE=$logfile
 
 export job_ai_qpf24_downscale=$job
-export NTHREAD=20
+export NTHREAD=32
 
 export ai_qpf24_downscale=`qsub -N $job_ai_qpf24_downscale \
                             -j oe \
@@ -264,7 +264,7 @@ export ai_qpf24_downscale=`qsub -N $job_ai_qpf24_downscale \
                             -W umask=022 \
                             -J 0-36
                             -V \
-                            -l selec=1:ncpus=$NTHREAD:mem=78gb \
+                            -l selec=1:ncpus=$NTHREAD:mem=140gb \
                             -l walltime=00:30:00 \
                             -l debug=true \
                             -q dev \

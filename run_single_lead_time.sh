@@ -48,6 +48,7 @@ echo $PDY
 
 LEAD_TIME=$1
 
+export COMIN=${COMIN:-${COMINblendbase:?}}/blend.${PDY}/$cyc/modeldata
 export COMOUTblendbase=${COMOUTblendbase:-$(compath.py -o ${NET}/${blend_ver})}
 export COMOUT=${COMOUT:-${COMOUTblendbase:?}}/blend.$PDY/$cyc/modeldata
 mkdir -m 755 -p $COMOUT
@@ -58,14 +59,12 @@ export LOGblend=${PTMPROOT}/dailylog/blend/log.${PDY}/${cyc}
 export job=DOWNSCALE_${LEAD_TIME}h_${cyc}.${pid}
 export logfile=$LOGblend/${job}.out
 export PBS_OUTPUTFILE=$logfile
-export DATA_IN=${COMOUT}/AI_percentile_predictions_pqpf24_${PDY}${cyc}_${LEAD_TIME}h_2layer_10cat_35epocs_early_stop_2p5km.zarr
 
+# override comout for testing purposes (aka don't save to dave's area)
 export COMOUT_TEST=/lfs/h3/mdl/nbm/noscrub/sidney.lower/blend/ush/downscale_model/test_output
 mkdir $COMOUT_TEST
+export COMOUT=$COMOUT_TEST
 
-
-export NTHREAD=$NCPUS
-cd $USHblend/downscale_model
-python apply_downscale_model.py $LEAD_TIME $PDY$cyc $DATA_IN $COMOUT_TEST
+python $USHblend/qpf24_downscale_ai_pytorch.py $LEAD_TIME 
 
 
