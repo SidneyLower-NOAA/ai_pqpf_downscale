@@ -255,7 +255,7 @@ if __name__ == "__main__":
 
     ###  Save to zarr
     print("... Saving data")
-    write_high_res_ds(collate_outputs, percentiles, latitude, longitude, refDate, LEAD_TIME, output_file, SMOOTHING)
+    write_high_res_ds(collate_outputs.squeeze(1).numpy(), percentiles, latitude, longitude, refDate, LEAD_TIME, output_file, SMOOTHING)
     print(f"... Finished writing Zarr: {output_file}")
 
     
