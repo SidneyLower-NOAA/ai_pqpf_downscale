@@ -35,7 +35,7 @@ def run_downscale_model(input_tensors, initialized_downscale_model, batch_size=2
             batch_count = ncount // 2
             print(f"     ... batch {batch_count} / {len(input_data_loader)}")
 
-    return collate_outputs, collate_percentiles
+    return collate_outputs, np.array(collate_percentiles)
 
 
 
@@ -171,7 +171,7 @@ if __name__ == "__main__":
     
     LEAD_TIME = int(sys.argv[1])
     
-    DATA_IN = f'{COMIN}/AI_percentile_predictions_pqpf24_{PDY}{cyc}_{LEADTIME}h_2layer_10cat_35epocs_early_stop_2p5km.zarr'
+    DATA_IN = f'{COMIN}/AI_percentile_predictions_pqpf24_{PDY}{cyc}_{LEAD_TIME}h_2layer_10cat_35epocs_early_stop_2p5km.zarr'
     DATA_OUT_DIR = COMOUT
     
     # SG smoothing will be optional
@@ -249,14 +249,14 @@ if __name__ == "__main__":
     ###  Run Model
     ### -------------------------- ###
     print("... Running model")
-    downscaled_outputs, percentiles = run_downscale_model(input_data_tensors, downscale_model, batch_size, io_threads)
+    downscaled_outputs, sorted_percentiles = run_downscale_model(input_data_tensors, downscale_model, batch_size, io_threads)
             
     ### ------------------------- ###
     ###  Save to zarr
     ### -------------------------- ###
     ref_date = pd.to_datetime(PDY, format='%Y%m%d%H')
     print("... Saving data")
-    write_high_res_ds(collate_outputs, np.array(collate_percentiles), latitude, longitude, ref_date, LEAD_TIME, output_file, SMOOTHING)
+    write_high_res_ds(downscaled_outputs, sorted_percentiles, latitude, longitude, ref_date, LEAD_TIME, output_file, SMOOTHING)
     print(f"... Finished writing Zarr: {output_file}")
 
     

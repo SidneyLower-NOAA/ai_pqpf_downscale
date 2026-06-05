@@ -61,7 +61,7 @@ export logfile=$LOGblend/${job}.out
 export PBS_OUTPUTFILE=$logfile
 
 # override comout for testing purposes (aka don't save to dave's area)
-export COMOUT_TEST=/lfs/h3/mdl/nbm/noscrub/sidney.lower/blend/ush/downscale_model/test_output
+export COMOUT_TEST=/lfs/h3/mdl/nbm/noscrub/sidney.lower/downscale_model_dev/test_output/
 mkdir $COMOUT_TEST
 export COMOUT=$COMOUT_TEST
 

@@ -59,7 +59,6 @@ class load_qpf_data(torch.utils.data.Dataset):
         with suppress_stdout():
             grid2p5=grib2io.open(f'{FIXai}/hiresw.t00z.arw_2p5km_one_message.grib2')
             grid20=grib2io.open(f'{FIXai}/hiresw.t00z.fv3_20km_one_message.grib2')
-            grid_out20 = grib2io.Grib2GridDef.from_section3(grid20[0].section3)
             grid_out2p5 = grib2io.Grib2GridDef.from_section3(grid2p5[0].section3)
             ds_topo_data.nml_terrain_20km.attrs["GRIB2IO_section3"] = grid20[0].section3
             interp_terrain = ds_topo_data.nml_terrain_20km.grib2io.interp("budget", grid_out2p5, num_threads=1)
