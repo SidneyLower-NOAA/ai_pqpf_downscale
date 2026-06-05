@@ -235,7 +235,7 @@ if __name__ == "__main__":
     
     print("... Loading model")
     ### load trained model weights
-    model_name = 'PQPF_upsample_MRMS_dropout_smoothedPSD'
+    model_name = 'PQPF_downscale_model_trained_state'
     saved_state = torch.load(f"{FIXai}/{model_name}.pth", map_location=torch.device('cpu'))
     
     in_channels = saved_state['model_args']['in_channels']
