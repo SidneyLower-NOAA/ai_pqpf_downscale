@@ -1,0 +1,104 @@
+#!/bin/sh
+########################################
+# BLENDER PREP SCRIPT
+########################################
+date
+export PS4=' $SECONDS + '
+set -x
+
+########################################
+# SET THE WORKING DIRECTORY
+########################################
+export DATA=${DATA:-${DATAROOT:?}/${jobid:?}}
+export pid=${pid:-${jobid:?}}
+mkdir -p $DATA
+cd $DATA
+export TMPDIR=$DATA
+
+####################################
+# Specify NET Name and RUN
+#
+# RUN - RUN grib field to repack
+####################################
+export NET=${NET:-blend}
+export RUN=${RUN:-blend}
+export pgmout="OUTPUT.$$"
+
+####################################
+# Specify NBM version number
+####################################
+export BLEND_MODEL_VERSION=${BLEND_MODEL_VERSION:-${blend_ver}}
+
+########################################
+# SET THE EXECUTION VARIABLES           
+########################################
+export SCRIPTSblend=${SCRIPTSblend:-${HOMEblend}/scripts}
+export FIXblend=${FIXblend:-${HOMEblend}/fix}
+export PARMblend=${PARMblend:-${HOMEblend}/parm}
+export EXECblend=${EXECblend:-${HOMEblend}/exec}
+export UTILblend=${UTILblend:-${HOMEblend}/ush/util}
+export USHblend=${USHblend:-${HOMEblend}/ush}
+########################################
+# SET THE DATE VARIABLES           
+########################################
+export cycle=${cycle:-t${cyc}z}
+setpdy.sh 12 1
+. ./PDY
+
+########################################
+# SET THE INPUT DIRECTORIES             
+########################################
+# Get the location of GEFS data
+#export COMINgefs=${COMINgefs:-$(dirname $(compath.py gefs/${gefs_ver}/gefs))}
+####export COMINgefs=${COMINgefs:-$(dirname $(compath.py gefs/${gefs_ver}/gefs))}
+export COMINblendbase=${COMINblendbase:-$(compath.py -o ${NET}/${blend_ver})}
+export COMIN=${COMIN:-${COMINblendbase:?}}/blend.${PDY}/$cyc/modeldata
+########################################
+# SET THE PREVIOUS DIRECTORIES             
+########################################
+export copyforward=${copyforward:-n}
+export processprevcyc=${processprevcyc:-n}
+
+export COMINm1=${COMINm1:-${COMINblendbase:?}/${RUN}.${PDYm1}}
+export COMINm2=${COMINm2:-${COMINblendbase:?}/${RUN}.${PDYm2}}
+export COMINm3=${COMINm3:-${COMINblendbase:?}/${RUN}.${PDYm3}}
+export COMINm4=${COMINm4:-${COMINblendbase:?}/${RUN}.${PDYm4}}
+export COMINm5=${COMINm5:-${COMINblendbase:?}/${RUN}.${PDYm5}}
+export COMINm6=${COMINm6:-${COMINblendbase:?}/${RUN}.${PDYm6}}
+export COMINm7=${COMINm7:-${COMINblendbase:?}/${RUN}.${PDYm7}}
+export COMINm8=${COMINm8:-${COMINblendbase:?}/${RUN}.${PDYm8}}
+export COMINm9=${COMINm9:-${COMINblendbase:?}/${RUN}.${PDYm9}}
+export COMINm10=${COMINm10:-${COMINblendbase:?}/${RUN}.${PDYm10}}
+export COMINm11=${COMINm11:-${COMINblendbase:?}/${RUN}.${PDYm11}}
+export COMINm12=${COMINm12:-${COMINblendbase:?}/${RUN}.${PDYm12}}
+
+########################################
+# SET THE OUTPUT DIRECTORIES             
+########################################
+export COMOUTblendbase=${COMOUTblendbase:-$(compath.py -o ${NET}/${blend_ver})}
+export COMOUT=${COMOUT:-${COMOUTblendbase:?}}/blend.$PDY/$cyc/modeldata
+mkdir -m 755 -p $COMOUT
+
+
+fhour_list=({24..240..6})
+JOB_ARRAY_IDX=$1
+LEAD_TIME="${fhour_list[$JOB_ARRAY_IDX]}"
+DATA_IN=${COMOUT}/AI_percentile_predictions_pqpf24_${PDY}${cyc}_${LEAD_TIME}h_2layer_10cat_35epocs_early_stop_2p5km.zarr
+
+python $USHblend/apply_downscale_model.py $LEAD_TIME $PDY $DATA_IN $COMOUT
+
+
+export err=$?; err_chk
+postmsg $jlogfile "$0 completed normally"
+
+
+
+########################################
+# CLEAN UP THE WORKING DIRECTORY         
+########################################
+
+if [ "$KEEPDATA" != "YES" ]; then
+   rm -rf $DATA
+fi
+
+date
