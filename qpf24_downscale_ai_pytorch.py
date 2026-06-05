@@ -155,6 +155,10 @@ def write_high_res_ds(
 
 if __name__ == "__main__":
 
+    print("-" * 60)
+    print(" BEGIN DOWNSCALE MODEL INFERENCE")
+    print("-" * 60)
+
     # timeit
     s = pd.Timestamp.now()
 
@@ -163,16 +167,14 @@ if __name__ == "__main__":
     ### -------------------------- ###
     
     COMIN = os.environ.get("COMIN")
-    COMOUT=os.getenv("COMOUT")
+    DATA_OUT_DIR=os.getenv("COMOUT")
     FIXblend=os.getenv("FIXblend")
     FIXai = FIXblend+'/AI/precip/'
     PDY = os.environ.get("PDY")
     cyc = os.environ.get("cyc")
+    refDate=pd.to_datetime(PDY+cyc, format='%Y%m%d%H')
     
     LEAD_TIME = int(sys.argv[1])
-    
-    DATA_IN = f'{COMIN}/AI_percentile_predictions_pqpf24_{PDY}{cyc}_{LEAD_TIME}h_2layer_10cat_35epocs_early_stop_2p5km.zarr'
-    DATA_OUT_DIR = COMOUT
     
     # SG smoothing will be optional
     # User can ovveride
@@ -182,40 +184,35 @@ if __name__ == "__main__":
     else:
         SMOOTHING = False
         sm_v = 'NO'
-    
-    # I'm going to assume the job card handles the directory creation, etc.
+
+    # handle output formatting
+    DATA_IN = f'{COMIN}/AI_percentile_predictions_pqpf24_{PDY}{cyc}_{LEAD_TIME}h_2layer_10cat_35epocs_early_stop_2p5km.zarr'
     filename = os.path.basename(DATA_IN).split('.')[0]
     data_format = os.path.basename(DATA_IN).split('.')[-1]
     output_file = DATA_OUT_DIR + f"{filename}_downscaled.{data_format}"
     # just in case
     if data_format not in ['grib2', 'zarr']:
         raise TypeError(f"Cannot process data of type {data_format}. Must be GRIB2 or Zarr")
-    
-    
-    print("-" * 60)
-    print(" BEGIN DOWNSCALE MODEL INFERENCE")
-    print("-" * 60)
-    print(" SCRIPT ARGS: ")
-    print(f"              LEAD TIME: {LEAD_TIME}")
-    print(f"              REF DATE: {pd.to_datetime(PDY+cyc, format='%Y%m%d%H')}")
-    print(f"              INPUT DATA: {DATA_IN}")
-    print(f"              OUTPUT FILE: {output_file}")
-    print(f"              SMOOTHING?: {sm_v}")
-    
-    # fixed vars for now
+
+    # set threads
     TOTAL_THREAD = int(os.environ["NTHREAD"]) - 2
     batch_size = 2
     io_threads = TOTAL_THREAD // 4
     model_threads = TOTAL_THREAD - io_threads
-    
     torch.set_num_threads(model_threads)
-    print(f"              THREADS: {torch.get_num_threads()}")
+
+    print(" SCRIPT ARGS: ")
+    print(f"              LEAD TIME: {LEAD_TIME}")
+    print(f"              REF DATE: {refDate}")
+    print(f"              INPUT DATA: {DATA_IN}")
+    print(f"              OUTPUT FILE: {output_file}")
+    print(f"              SMOOTHING?: {sm_v}")
+    print(f"              NTHREADS FOR UNET: {torch.get_num_threads()}")
     
     ### ------------------------- ###
     ###  Load & Process Data
     ### -------------------------- ###
     
-    # hate to hard code, but i just can't be bothered to do something more sophisticated
     percentiles = np.array([5,10,20,25,30,40,50,60,70,75,80,90,95])
     
     print("... Loading data")
@@ -254,9 +251,8 @@ if __name__ == "__main__":
     ### ------------------------- ###
     ###  Save to zarr
     ### -------------------------- ###
-    ref_date = pd.to_datetime(PDY+cyc, format='%Y%m%d%H')
     print("... Saving data")
-    write_high_res_ds(downscaled_outputs, sorted_percentiles, latitude, longitude, ref_date, LEAD_TIME, output_file, SMOOTHING)
+    write_high_res_ds(downscaled_outputs, sorted_percentiles, latitude, longitude, refDate, LEAD_TIME, output_file, SMOOTHING)
     print(f"... Finished writing Zarr: {output_file}")
 
     
