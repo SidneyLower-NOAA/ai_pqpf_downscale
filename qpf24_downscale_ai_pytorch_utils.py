@@ -453,27 +453,31 @@ class Downscale_Model(nn.Module):
         )
 
     def forward(self, input_data, time_vector):
-
+        print("[DOWNSCALER]: In forward pass")
         batch_size = input_data.shape[0]
         pos_emb = self.pos_emb.expand(batch_size, -1, -1, -1)
         time_emb = self.time_emb(time_vector)
 
         x = torch.cat([input_data, pos_emb], dim=1)
-
+        print("[DOWNSCALER]: Formatted input tensor")
         
-
+        print("[DOWNSCALER]: 1st conv")
         # expand feature dimensions from 4 --> n features
         x = self.conv_input(x)
-
+        print("[DOWNSCALER]: ... done")
         # now do series of convolutions, keeping feature density the same
+        print("[DOWNSCALER]: Hidden layers")
         for conv_block in self.conv_hidden:
             x = conv_block(x)
+            print("[DOWNSCALER]: ... done")
 
         # perform pixel shuffles
         x_refined = self.refine(x, time_emb)
+        print("[DOWNSCALER]: Refined")
 
         # upsample to final grid size
         x_full_size = self.full_size(x_refined)
+        print("[DOWNSCALER]: full size.")
 
         return self.final(x_full_size)
 
