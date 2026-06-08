@@ -152,12 +152,45 @@ if __name__ == "__main__":
     # run model in parallel
     collate_outputs.share_memory_()
 
-    mp.spawn(
-        worker_fn,
-        args=(model_threads,os_vars, para_vars, collate_outputs),
-        nprocs=model_threads,
-        join=True
-    )
+    #mp.spawn(
+    #    worker_fn,
+    #    args=(model_threads,os_vars, para_vars, collate_outputs),
+    #    nprocs=model_threads,
+    #    join=True
+    #)
+
+    torch.set_num_threads(1)
+
+    
+    ### load trained model weights
+    model_name = 'PQPF_downscale_model_trained_state'
+    saved_state = torch.load(f"{FIXblend}/AI/precip/{model_name}.pth", map_location='cpu')
+    in_channels = saved_state['model_args']['in_channels']
+    features = saved_state['model_args']['n_features_max']
+    n_conv_layers = saved_state['model_args']['n_conv_layers']
+    downscale_model = init_model(grid_dims=(ny, nx),in_channels=in_channels,features=features,n_conv_layers=n_conv_layers)
+    downscale_model.load_state_dict(saved_state['model_state_dict'])
+
+    ### process data
+    input_data_tensors = xr_to_tensor(percentile_da, nml_qpf_mean, nml_qpf_std,terrain_20km, terrain_2p5km)
+    sampler = DistributedSampler(input_data_tensors, num_replicas=world_size, rank=rank, shuffle=False)
+    input_data_loader = torch.utils.data.DataLoader(input_data_tensors, batch_size=batch_size, sampler=sampler, num_workers=0)
+
+
+    ### run inference
+    downscale_model.eval() 
+    with torch.no_grad(): 
+        ncount = 0
+        for low_res_input, time_vector, grid20, percentile in input_data_loader:
+            print(f"     starting forward pass...")
+            output_batch = downscale_model(low_res_input, time_vector)
+            print(f"     finished with forward pass")
+            per_list = percentile.tolist()
+            for out in range(len(output_batch)):
+                collate_outputs[per_list.index(out)] = torch.expm1(output_batch[out].squeeze(0).squeeze(0)) * grid20[out]
+                ncount += 1
+
+    
 
     print(f"[DEBUG]: output size: {collate_outputs.size()}")
 
