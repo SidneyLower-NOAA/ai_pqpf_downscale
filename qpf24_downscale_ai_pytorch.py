@@ -11,15 +11,16 @@ from torch.utils.data.distributed import DistributedSampler
 import sys
 import os
 
-from qpf24_downscale_ai_pytorch_utils import load_qpf_data, init_model
+from qpf24_downscale_ai_pytorch_utils import load_consts, load_qpf_data, xr_to_tensor, init_model
 
 
 
+def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collate_outputs: torch.tensor):
 
 
-def worker_fn(rank: int, world_size: int, os_vars: list, collate_outputs: torch.tensor):
-
-    FIXblend, DATA_IN, data_format, percentiles, (ny, nx), batch_size = os_vars
+    FIXblend, (ny, nx), batch_size = os_vars
+    percentile_da, nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km, percentiles = para_vars
+    
     
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
@@ -244,8 +245,14 @@ if __name__ == "__main__":
     # runtime consts
     percentiles = np.array([5,10,20,25,30,40,50,60,70,75,80,90,95])
     ny, nx = np.shape(longitude) 
-    os_vars = [FIXblend, DATA_IN, data_format, percentiles, (ny, nx), batch_size]
 
+
+    # load data (constants + percentiles)
+    percentile_da = load_qpf_data(DATA_IN, data_format)
+    nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km = load_consts(FIXblend)
+    para_vars = [percentile_da, nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km, percentiles, (ny, nx), batch_size]
+    
+    
     # run model in parallel
     collate_outputs = torch.zeros((len(percentiles), 1, ny, nx))
 
@@ -254,7 +261,7 @@ if __name__ == "__main__":
     print(" SENDING DATA TO MULTIPROCESSING WORKERS")
     mp.spawn(
         worker_fn,
-        args=(model_threads,os_vars, collate_outputs),
+        args=(model_threads,para_vars, collate_outputs),
         nprocs=model_threads,
         join=True
     )

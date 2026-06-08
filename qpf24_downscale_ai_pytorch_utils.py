@@ -27,58 +27,80 @@ def suppress_stdout():
             os.dup2(old_stdout_fd, 1)
             os.close(old_stdout_fd)
 
-class load_qpf_data(torch.utils.data.Dataset):
-    def __init__(self, data_path: str, percentiles: np.array, data_format: str):
+def load_constants(FIXblend: str):
 
-        FIXblend=os.getenv("FIXblend")
-        FIXai = FIXblend+"/AI/precip/"
+    FIXai = FIXblend+"/AI/precip/"
+    
+    # stats for normalizing wrt training data                                                                                                       
+    qpe_stats = xr.open_dataset(
+           FIXai+"downscaling_training_stats_for_normalization.nc"
+        ).load()
+    precip_mean = qpe_stats.mean_log_precip.values
+    precip_std = qpe_stats.std_log_precip.values
 
-        self.data_file = data_path
+    # Process LOW RES terrain features                                                                                                              
+    terrain_file = (
+        FIXai+"terrain_20km_nml_to.nc"
+    )
+    ds_topo_data = xr.open_dataset(terrain_file).load()
+    # regrid onto 2.5km grid                                                                                                                        
+    with suppress_stdout():
+        grid2p5=grib2io.open(f'{FIXai}/hiresw.t00z.arw_2p5km_one_message.grib2')
+        grid20=grib2io.open(f'{FIXai}/hiresw.t00z.fv3_20km_one_message.grib2')
+        grid_out2p5 = grib2io.Grib2GridDef.from_section3(grid2p5[0].section3)
+        ds_topo_data.nml_terrain_20km.attrs["GRIB2IO_section3"] = grid20[0].section3
+        interp_terrain = ds_topo_data.nml_terrain_20km.grib2io.interp("budget", grid_out2p5, num_threads=1)
+
+    terrain_20km = np.nan_to_num(interp_terrain.values)
+
+    # Process HIGH RES terrain features
+    terrain_file = (
+        FIXai+"terrain_2p5km_nml_to.nc"
+    )
+    ds_topo_data = xr.open_dataset(terrain_file).load()
+    terrain_2p5km = np.nan_to_num(ds_top_data.nml_terrain_2p5km.values)
+
+    return precip_mean, precip_std, terrain_20km, terrain_2p5km
+
+
+
+def load_qpf_data(data_path: str, data_format: str):
+
+    if data_format == 'grib2':
+        ds = xr.open_dataset(data_path, engine='grib2io')
+        da = ds.APCP
+    elif data_format == 'zarr':
+        ds = xr.open_dataset(data_path, decode_timedelta=True, engine='zarr')
+        da = ds.pqpf24_percentile_prediction
+
+    return da
+
+            
+class xr_to_tensor(torch.utils.data.Dataset):
+    def __init__(self, percentile_data: xr.DataArray, data_format: str,
+                 qpe_stats_mean: np.array, qpe_stats_std: np.array,
+                 terrain_20km: np.array, terrain_2p5km: np.array):
+
+        
         self.data_format = data_format
-        self.ds = None
+        self.da = percentile_data
 
         # the way this will run is each lead time has its own task
         # BUT we want to process all percentiles, so n_samples
         # will be the number of percentiles
+        if data_format == 'grib2':
+            percentiles = percentile_data.percentileValue.values
+        elif data_format == 'zarr':
+            percentiles = percentile_data.percentiles.values
+            
         self.n_samples = len(percentiles)
         self.percentiles = percentiles
 
-        # stats for normalizing wrt training data
-        qpe_stats = xr.open_dataset(
-            FIXai+"downscaling_training_stats_for_normalization.nc"
-        ).load()
-        self.precip_mean = qpe_stats.mean_log_precip.values
-        self.precip_std = qpe_stats.std_log_precip.values
+        self.precip_mean = qpe_stats_mean
+        self.precip_std = qpe_stats_std
 
-        # Process LOW RES terrain features
-        terrain_file = (
-            FIXai+"terrain_20km_nml_to.nc"
-        )
-        ds_topo_data = xr.open_dataset(terrain_file).load()
-        # regrid onto 2.5km grid
-        with suppress_stdout():
-            grid2p5=grib2io.open(f'{FIXai}/hiresw.t00z.arw_2p5km_one_message.grib2')
-            grid20=grib2io.open(f'{FIXai}/hiresw.t00z.fv3_20km_one_message.grib2')
-            grid_out2p5 = grib2io.Grib2GridDef.from_section3(grid2p5[0].section3)
-            ds_topo_data.nml_terrain_20km.attrs["GRIB2IO_section3"] = grid20[0].section3
-            interp_terrain = ds_topo_data.nml_terrain_20km.grib2io.interp("budget", grid_out2p5, num_threads=1)
-        
-        terrain_tensor = (
-            torch.from_numpy(np.nan_to_num(interp_terrain.values, 0.0))
-            .float()
-            .unsqueeze(0)
-        )
-        lowres_features = terrain_tensor  # torch.cat([terrain_tensor], dim=0)
-
-        # Process HIGH RES terrain features
-        terrain_file = FIXai+"terrain_2p5km_nml_to.nc"
-        ds_topo_data = xr.open_dataset(terrain_file).load()
-        terrain_tensor = (
-            torch.from_numpy(np.nan_to_num(ds_topo_data.nml_terrain_2p5km.values, 0.0))
-            .float()
-            .unsqueeze(0)
-        )
-        self.highres_terrain = terrain_tensor
+        lowres_features = torch.from_numpy(np.nan_to_num(terrain_20km))
+        self.highres_terrain = torch.from_numpy(np.nan_to_num(terrain_2p5km))
 
         # Compute elevation gradient, difference between 20km and 2.5km resolution
         self.elev_diff = self.highres_terrain - lowres_features
@@ -86,32 +108,18 @@ class load_qpf_data(torch.utils.data.Dataset):
     def __len__(self):
         return self.n_samples
 
-    def _get_ds(self):
-        # since we're only opening 1 file but iterating over percentiles
-        # we can save time by opening it and loading it just once
-        if self.ds is None:
-            if self.data_format == 'grib2':
-                ds = xr.open_dataset(self.data_file, engine='grib2io')
-            elif self.data_format == 'zarr':
-                ds = xr.open_dataset(self.data_file, decode_timedelta=True, engine='zarr')
-            # on first time opening, load valid dates for quick look up later
-            ds.validDate.load()
-            self.ds = ds
-        return self.ds
-
-
     def __getitem__(self, idx):
 
-        self.ds = self._get_ds()
+
         percentile = self.percentiles[idx]
 
         # this is annoying
         if self.data_format == 'grib2':
-            interp20_to_2p5 = np.nan_to_num(self.ds.APCP.isel(percentileValue=idx).values, 0.0)
+            interp20_to_2p5 = np.nan_to_num(self.da.isel(percentileValue=idx).values, 0.0)
         elif self.data_format == 'zarr':
-            interp20_to_2p5 = np.nan_to_num(self.ds.pqpf24_percentile_prediction.isel(percentiles=idx).values, 0.0)
+            interp20_to_2p5 = np.nan_to_num(self.da.isel(percentiles=idx).values, 0.0)
 
-        valid_date = pd.to_datetime(self.ds.validDate.values)
+        valid_date = pd.to_datetime(self.da.validDate.values)
 
         logp1_feature = np.log1p(interp20_to_2p5)
         normalized_feature = (logp1_feature - self.precip_mean) / self.precip_std
