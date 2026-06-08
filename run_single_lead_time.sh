@@ -52,20 +52,15 @@ export COMOUTblendbase=${COMOUTblendbase:-$(compath.py -o ${NET}/${blend_ver})}
 export COMOUT=${COMOUT:-${COMOUTblendbase:?}}/blend.$PDY/$cyc/modeldata
 mkdir -m 755 -p $COMOUT
 
-export PBS_ACCT="NBM-DEV"
-export pid=$$
-export LOGblend=${PTMPROOT}/dailylog/blend/log.${PDY}/${cyc}
-export job=DOWNSCALE_${LEAD_TIME}h_${cyc}.${pid}
-export logfile=$LOGblend/${job}.out
-export PBS_OUTPUTFILE=$logfile
-
 # override comout for testing purposes (aka don't save to dave's area)
 export COMOUT_TEST=/lfs/h3/mdl/nbm/noscrub/sidney.lower/downscale_model_dev/test_output/
 mkdir $COMOUT_TEST
 export COMOUT=$COMOUT_TEST
 
-export NTHREAD=30
+export OMP_NUM_THREADS=13
+#export OMP_PROC_BIND=true
+#export OMP_PLACES=cores
 
-python $USHblend/qpf24_downscale_ai_pytorch.py $LEAD_TIME 
-
+#mpiexec -n 1 --ppn 1 --cpu-bind verbose,depth --depth $NTHREAD python $USHblend/qpf24_downscale_ai_pytorch.py $LEAD_TIME 
+python $USHblend/qpf24_downscale_ai_pytorch.py $LEAD_TIME
 

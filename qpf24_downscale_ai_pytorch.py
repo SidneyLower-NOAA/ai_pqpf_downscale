@@ -1,11 +1,11 @@
 import pandas as pd
-import numpy as np
-import xarray as xr
+#import numpy as np
+#import xarray as xr
 
-import torch
-import torch.multiprocessing as mp
-import torch.distributed as dist
-from torch.utils.data.distributed import DistributedSampler
+#import torch
+#import torch.multiprocessing as mp
+#import torch.distributed as dist
+#from torch.utils.data.distributed import DistributedSampler
 
 import sys
 import os
@@ -18,6 +18,19 @@ os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
+#torch.set_flush_denormal(True)
+os.environ['KMP_DUPLICATE_LIB_OK'] = "TRUE"
+
+
+import numpy as np
+import xarray as xr
+
+import torch
+import torch.multiprocessing as mp
+import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
+
+torch.set_flush_denormal(True)
 
 def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collate_outputs: torch.tensor):
 
@@ -172,23 +185,30 @@ if __name__ == "__main__":
     downscale_model.load_state_dict(saved_state['model_state_dict'])
 
     ### process data
-    input_data_tensors = xr_to_tensor(percentile_da, nml_qpf_mean, nml_qpf_std,terrain_20km, terrain_2p5km)
-    sampler = DistributedSampler(input_data_tensors, num_replicas=world_size, rank=rank, shuffle=False)
-    input_data_loader = torch.utils.data.DataLoader(input_data_tensors, batch_size=batch_size, sampler=sampler, num_workers=0)
+    #input_data_tensors = xr_to_tensor(percentile_da, nml_qpf_mean, nml_qpf_std,terrain_20km, terrain_2p5km)
+    #sampler = DistributedSampler(input_data_tensors, num_replicas=world_size, rank=rank, shuffle=False)
+    #input_data_loader = torch.utils.data.DataLoader(input_data_tensors, batch_size=batch_size, num_workers=0)
 
 
+    test_da = torch.randn(1, in_channels, ny, nx)
+    time_vector = torch.tensor([[ 0.3936, -0.9193,  0.0000,  1.0000]])
     ### run inference
     downscale_model.eval() 
     with torch.no_grad(): 
-        ncount = 0
-        for low_res_input, time_vector, grid20, percentile in input_data_loader:
-            print(f"     starting forward pass...")
-            output_batch = downscale_model(low_res_input, time_vector)
-            print(f"     finished with forward pass")
-            per_list = percentile.tolist()
-            for out in range(len(output_batch)):
-                collate_outputs[per_list.index(out)] = torch.expm1(output_batch[out].squeeze(0).squeeze(0)) * grid20[out]
-                ncount += 1
+
+        print("starting forward pass")
+        outp = downscale_model(test_da, time_vector)
+        print("done")
+        #ncount = 0
+        #for low_res_input, time_vector, grid20, percentile in input_data_loader:
+        #    print(f"     starting forward pass...")
+        #    print(f"     LOADED INPUTS?: {time_vector}")
+        #    output_batch = downscale_model(low_res_input, time_vector)
+        #    print(f"     finished with forward pass")
+        #    per_list = percentile.tolist()
+        #    for out in range(len(output_batch)):
+        #        collate_outputs[per_list.index(out)] = torch.expm1(output_batch[out].squeeze(0).squeeze(0)) * grid20[out]
+        #        ncount += 1
 
     
 
