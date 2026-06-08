@@ -12,7 +12,12 @@ import os
 
 from qpf24_downscale_ai_pytorch_utils import load_constants, load_qpf_data, xr_to_tensor, init_model, write_high_res_ds
 
-
+# Force ALL underlying libraries to use exactly 1 thread per process
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collate_outputs: torch.tensor):
 
