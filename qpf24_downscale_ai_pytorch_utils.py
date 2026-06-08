@@ -79,7 +79,6 @@ class xr_to_tensor(torch.utils.data.Dataset):
                  terrain_20km: np.array, terrain_2p5km: np.array):
 
         
-        self.data_format = data_format
         self.da = percentile_data
 
         # the way this will run is each lead time has its own task
@@ -93,12 +92,13 @@ class xr_to_tensor(torch.utils.data.Dataset):
         self.precip_mean = qpe_stats_mean
         self.precip_std = qpe_stats_std
 
-        lowres_features = torch.from_numpy(np.nan_to_num(terrain_20km))
-        self.highres_terrain = torch.from_numpy(np.nan_to_num(terrain_2p5km))
+        lowres_terrain = torch.from_numpy(np.nan_to_num(terrain_20km)).float()
+        highres_terrain = torch.from_numpy(np.nan_to_num(terrain_2p5km)).float()
 
         # Compute elevation gradient, difference between 20km and 2.5km resolution
-        self.elev_diff = self.highres_terrain - lowres_features
-
+        self.elev_diff = (highres_terrain - lowres_terrain).unsqueeze(0)
+        self.highres_features = highres_terrain.unsqueeze(0)
+        
     def __len__(self):
         return self.n_samples
 
@@ -131,7 +131,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
             normalized_feature, dtype=torch.float32
         ).unsqueeze(0)
         combined_features = torch.cat(
-            [feature_tensor, self.highres_terrain, self.elev_diff], dim=0
+            [feature_tensor, self.highres_features, self.elev_diff], dim=0
         )
 
         return combined_features, time_vector, interp20_to_2p5, percentile

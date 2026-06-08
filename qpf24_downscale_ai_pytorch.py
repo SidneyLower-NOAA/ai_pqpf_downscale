@@ -10,17 +10,18 @@ from torch.utils.data.distributed import DistributedSampler
 import sys
 import os
 
-from qpf24_downscale_ai_pytorch_utils import load_consts, load_qpf_data, xr_to_tensor, init_model, write_high_res_ds
+from qpf24_downscale_ai_pytorch_utils import load_constants, load_qpf_data, xr_to_tensor, init_model, write_high_res_ds
 
 
 
 def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collate_outputs: torch.tensor):
 
 
-    FIXblend, (ny, nx), batch_size, data_format = os_vars
+    FIXblend, (ny, nx), batch_size = os_vars
     percentile_da, nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km = para_vars
     
-    
+    if rank == 1:
+        print("... Initializing workers")
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
     dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
@@ -133,8 +134,9 @@ if __name__ == "__main__":
 
 
     # load data (constants + percentiles)
-    percentile_da = load_qpf_data(DATA_IN, data_format)
-    nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km = load_consts(FIXblend)
+    print("... Grabbing constant grids")
+    percentile_da = load_qpf_data(DATA_IN)
+    nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km = load_constants(FIXblend)
     os_vars = [FIXblend, (ny, nx), batch_size]
     para_vars = [percentile_da, nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km]
 
