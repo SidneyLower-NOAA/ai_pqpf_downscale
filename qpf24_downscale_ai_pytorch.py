@@ -54,15 +54,15 @@ def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collat
     with torch.no_grad(): 
         ncount = 0
         for low_res_input, time_vector, grid20, percentile in input_data_loader:
-
+            print(f"     Rank {rank} starting forward pass...")
             output_batch = downscale_model(low_res_input, time_vector)
-
+            print(f"     Rank {rank} finished with forward pass")
             per_list = percentile.tolist()
             for out in range(len(output_batch)):
                 collate_outputs[per_list.index(out)] = torch.expm1(output_batch[out].squeeze(0).squeeze(0)) * grid20[out]
                 ncount += 1
-                print(f"     RANK {rank}: grid {ncount} / {len(input_data_loader)}")
-            
+
+    print(f"     Rank {rank} done with writing to shared tensor")
     dist.destroy_process_group()
 
     return
@@ -111,8 +111,8 @@ if __name__ == "__main__":
 
     # set threads
     #TOTAL_THREAD = int(os.environ["NTHREAD"]) - 2
-    batch_size = 2
-    model_threads = 16
+    batch_size = 1
+    model_threads = 13
 
     print(" SCRIPT ARGS: ")
     print(f"              LEAD TIME: {LEAD_TIME}")
@@ -147,7 +147,6 @@ if __name__ == "__main__":
     # run model in parallel
     collate_outputs.share_memory_()
 
-    print(" SENDING DATA TO MULTIPROCESSING WORKERS")
     mp.spawn(
         worker_fn,
         args=(model_threads,os_vars, para_vars, collate_outputs),
