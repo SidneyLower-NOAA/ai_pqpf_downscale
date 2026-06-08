@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import xarray as xr
 import grib2io
+from scipy import signal
 import os
 from contextlib import contextmanager, redirect_stdout
 
@@ -58,26 +59,22 @@ def load_constants(FIXblend: str):
         FIXai+"terrain_2p5km_nml_to.nc"
     )
     ds_topo_data = xr.open_dataset(terrain_file).load()
-    terrain_2p5km = np.nan_to_num(ds_top_data.nml_terrain_2p5km.values)
+    terrain_2p5km = np.nan_to_num(ds_topo_data.nml_terrain_2p5km.values)
 
     return precip_mean, precip_std, terrain_20km, terrain_2p5km
 
 
 
-def load_qpf_data(data_path: str, data_format: str):
+def load_qpf_data(data_path: str):
 
-    if data_format == 'grib2':
-        ds = xr.open_dataset(data_path, engine='grib2io')
-        da = ds.APCP
-    elif data_format == 'zarr':
-        ds = xr.open_dataset(data_path, decode_timedelta=True, engine='zarr')
-        da = ds.pqpf24_percentile_prediction
+    ds = xr.open_dataset(data_path, decode_timedelta=True, engine='zarr')
+    da = ds.pqpf24_percentile_prediction
 
     return da
 
             
 class xr_to_tensor(torch.utils.data.Dataset):
-    def __init__(self, percentile_data: xr.DataArray, data_format: str,
+    def __init__(self, percentile_data: xr.DataArray,
                  qpe_stats_mean: np.array, qpe_stats_std: np.array,
                  terrain_20km: np.array, terrain_2p5km: np.array):
 
@@ -88,10 +85,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
         # the way this will run is each lead time has its own task
         # BUT we want to process all percentiles, so n_samples
         # will be the number of percentiles
-        if data_format == 'grib2':
-            percentiles = percentile_data.percentileValue.values
-        elif data_format == 'zarr':
-            percentiles = percentile_data.percentiles.values
+        percentiles = percentile_data.percentiles.values
             
         self.n_samples = len(percentiles)
         self.percentiles = percentiles
@@ -113,12 +107,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
 
         percentile = self.percentiles[idx]
 
-        # this is annoying
-        if self.data_format == 'grib2':
-            interp20_to_2p5 = np.nan_to_num(self.da.isel(percentileValue=idx).values, 0.0)
-        elif self.data_format == 'zarr':
-            interp20_to_2p5 = np.nan_to_num(self.da.isel(percentiles=idx).values, 0.0)
-
+        interp20_to_2p5 = np.nan_to_num(self.da.isel(percentiles=idx).values, 0.0)
         valid_date = pd.to_datetime(self.da.validDate.values)
 
         logp1_feature = np.log1p(interp20_to_2p5)
@@ -146,6 +135,121 @@ class xr_to_tensor(torch.utils.data.Dataset):
         )
 
         return combined_features, time_vector, interp20_to_2p5, percentile
+
+# Write out to Zarr
+def write_high_res_ds(
+    hires_output, percentiles, latitude, longitude, ref_date, lead_time, output_file, SMOOTHING,
+):
+
+    sort_idx = percentiles.argsort()
+
+    # deal with datetime stuff
+    leadTime = pd.Timedelta(hours=lead_time)
+    refDate = ref_date
+    validDate = ref_date + leadTime
+
+    # sort data arrays
+    output_sorted = hires_output[sort_idx]
+    percentiles_sorted = percentiles[sort_idx]
+
+    # OPTIONAL SMOOTHING
+    if SMOOTHING:
+        print(" ***** APPLYING SG SMOOTHING TO OUTPUT ***** ")
+        output_smoothed = np.zeros_like(output_sorted)
+        for grid in range(len(percentiles)):
+            output_smoothed[grid] = sgolay2d(output_sorted[grid], 25, 3)
+    else:
+        output_smoothed = output_sorted
+
+    # write out
+    da = xr.DataArray(
+                    data=output_smoothed,
+                    dims=["percentiles", "y", "x"],
+                    coords=dict(
+                            refDate=refDate,
+                            validDate=validDate,
+                            leadTime=leadTime,
+                            duration=pd.Timedelta(hours=24),
+                            latitude=(["y", "x"],latitude),
+                            longitude=(["y", "x"],longitude),
+                            percentiles=(['percentiles'], percentiles_sorted)
+                        )
+                    )
+
+    da.name = 'pqpf24_percentile_prediction'
+    da.to_zarr(output_file, mode="w")
+    return
+
+
+# Smoothing (stolen from Eric) :)
+def sgolay2d (z, window_size, order):
+    """
+    Apply a Savitsky-Golay filter to a 2D array.
+    """
+    # number of terms in the polynomial expression
+    n_terms = ( order + 1 ) * ( order + 2)  / 2.0
+
+    if  window_size % 2 == 0:
+        raise ValueError('window_size must be odd')
+
+    if window_size**2 < n_terms:
+        raise ValueError('order is too high for the window size')
+
+    half_size = window_size // 2
+
+    # exponents of the polynomial.
+    # p(x,y) = a0 + a1*x + a2*y + a3*x^2 + a4*y^2 + a5*x*y + ...
+    # this line gives a list of two item tuple. Each tuple contains
+    # the exponents of the k-th term. First element of tuple is for x
+    # second element for y.
+    # Ex. exps = [(0,0), (1,0), (0,1), (2,0), (1,1), (0,2), ...]
+    exps = [ (k-n, n) for k in range(order+1) for n in range(k+1) ]
+
+    # coordinates of points
+    ind = np.arange(-half_size, half_size+1, dtype=np.float32)
+    dx = np.repeat( ind, window_size )
+    dy = np.tile( ind, [window_size, 1]).reshape(window_size**2, )
+
+    # build matrix of system of equation
+    A = np.empty( (window_size**2, len(exps)) )
+    for i, exp in enumerate( exps ):
+        A[:,i] = (dx**exp[0]) * (dy**exp[1])
+
+    # pad input array with appropriate values at the four borders
+    new_shape = z.shape[0] + 2*half_size, z.shape[1] + 2*half_size
+    Z = np.zeros( (new_shape) )
+    # top band
+    band = z[0, :]
+    Z[:half_size, half_size:-half_size] =  band -  np.abs( np.flipud( z[1:half_size+1, :] ) - band )
+    # bottom band
+    band = z[-1, :]
+    Z[-half_size:, half_size:-half_size] = band  + np.abs( np.flipud( z[-half_size-1:-1, :] )  -band )
+    # left band
+    band = np.tile( z[:,0].reshape(-1,1), [1,half_size])
+    Z[half_size:-half_size, :half_size] = band - np.abs( np.fliplr( z[:, 1:half_size+1] ) - band )
+    # right band
+    band = np.tile( z[:,-1].reshape(-1,1), [1,half_size] )
+    Z[half_size:-half_size, -half_size:] =  band + np.abs( np.fliplr( z[:, -half_size-1:-1] ) - band )
+    # central band
+    Z[half_size:-half_size, half_size:-half_size] = z
+
+    # top left corner
+    band = z[0,0]
+    Z[:half_size,:half_size] = band - np.abs( np.flipud(np.fliplr(z[1:half_size+1,1:half_size+1]) ) - band )
+    # bottom right corner
+    band = z[-1,-1]
+    Z[-half_size:,-half_size:] = band + np.abs( np.flipud(np.fliplr(z[-half_size-1:-1,-half_size-1:-1]) ) - band )
+
+    # top right corner
+    band = Z[half_size,-half_size:]
+    Z[:half_size,-half_size:] = band - np.abs( np.flipud(Z[half_size+1:2*half_size+1,-half_size:]) - band )
+    # bottom left corner
+    band = Z[-half_size:,half_size].reshape(-1,1)
+    Z[-half_size:,:half_size] = band - np.abs( np.fliplr(Z[-half_size:, half_size+1:2*half_size+1]) - band )
+
+    # solve system and convolve
+    m = np.linalg.pinv(A)[0].reshape((window_size, -1))
+    return signal.fftconvolve(Z, m, mode='valid')
 
 
 """
