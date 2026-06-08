@@ -68,7 +68,15 @@ def load_constants(FIXblend: str):
 def load_qpf_data(data_path: str):
 
     ds = xr.open_dataset(data_path, decode_timedelta=True, engine='zarr')
-    da = ds.pqpf24_percentile_prediction
+    if ds.y.shape[0] > 1000:
+        with suppress_stdout():
+            grid2p5=grib2io.open(f'{FIXai}/hiresw.t00z.arw_2p5km_one_message.grib2')
+            grid20=grib2io.open(f'{FIXai}/hiresw.t00z.fv3_20km_one_message.grib2')
+            grid_out20 = grib2io.Grib2GridDef.from_section3(grid20[0].section3)
+            ds.pqpf24_percentile_prediction.attrs["GRIB2IO_section3"] = grid2p5[0].section3
+            da = ds.pqpf24_percentile_prediction.grib2io.interp("budget", grid_out20, num_threads=1)
+    else:        
+        da = ds.pqpf24_percentile_prediction
 
     return da
 
