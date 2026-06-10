@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import xarray as xr
 import grib2io
-from scipy import signal
+from scipy import signal, ndimage
 import os
 from contextlib import contextmanager, redirect_stdout
 
@@ -68,17 +68,22 @@ def load_constants(FIXblend: str):
 def load_qpf_data(data_path: str):
 
     ds = xr.open_dataset(data_path, decode_timedelta=True, engine='zarr')
-    if ds.y.shape[0] > 1000:
-        with suppress_stdout():
-            grid2p5=grib2io.open(f'{FIXai}/hiresw.t00z.arw_2p5km_one_message.grib2')
-            grid20=grib2io.open(f'{FIXai}/hiresw.t00z.fv3_20km_one_message.grib2')
-            grid_out20 = grib2io.Grib2GridDef.from_section3(grid20[0].section3)
-            ds.pqpf24_percentile_prediction.attrs["GRIB2IO_section3"] = grid2p5[0].section3
-            da = ds.pqpf24_percentile_prediction.grib2io.interp("budget", grid_out20, num_threads=1)
-    else:        
-        da = ds.pqpf24_percentile_prediction
+    da = ds.pqpf24_percentile_prediction
 
     return da
+
+def feather_cliff_edges(ai_data, threshold=0.254, decay_rate=0.02):
+    """
+    Finds the blunt cliff edges in the AI PQPF data smooths them out with an exponential 
+    physical decay tail matching the MRMS edge topology.
+    """
+    rain_mask = ai_data > threshold
+    distance_map = ndimage.distance_transform_edt(rain_mask)
+    feather_multiplier = 1.0 - np.exp(-distance_map * decay_rate)
+    feathered_data = ai_data * feather_multiplier
+    feathered_data[~rain_mask] = 0.0
+    
+    return feathered_data
 
             
 class xr_to_tensor(torch.utils.data.Dataset):
@@ -118,7 +123,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
         interp20_to_2p5 = np.nan_to_num(self.da.isel(percentiles=idx).values, 0.0)
         valid_date = pd.to_datetime(self.da.validDate.values)
 
-        logp1_feature = np.log1p(interp20_to_2p5)
+        logp1_feature = np.log1p(feather_cliff_edges(interp20_to_2p5))
         normalized_feature = (logp1_feature - self.precip_mean) / self.precip_std
 
         # add timing tensors
@@ -146,7 +151,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
 
 # Write out to Zarr
 def write_high_res_ds(
-    hires_output, percentiles, latitude, longitude, ref_date, lead_time, output_file, SMOOTHING,
+    hires_output, percentiles, latitude, longitude, ref_date, lead_time, output_file,
 ):
 
     sort_idx = percentiles.argsort()
@@ -160,15 +165,10 @@ def write_high_res_ds(
     output_sorted = hires_output[sort_idx]
     percentiles_sorted = percentiles[sort_idx]
 
-    # OPTIONAL SMOOTHING
-    if SMOOTHING:
-        print(" ***** APPLYING SG SMOOTHING TO OUTPUT ***** ")
-        output_smoothed = np.zeros_like(output_sorted)
-        for grid in range(len(percentiles)):
-            output_smoothed[grid] = sgolay2d(output_sorted[grid], 25, 3)
-    else:
-        output_smoothed = output_sorted
-
+    output_smoothed = np.zeros_like(output_sorted)
+    for grid in range(len(percentiles)):
+        output_smoothed[grid] = sgolay2d(output_sorted[grid], 11, 3)
+    
     # write out
     da = xr.DataArray(
                     data=output_smoothed,
@@ -320,56 +320,6 @@ class Time_Embedding(nn.Module):
         return self.time_mlp(time_vector)
 
 
-class FiLM_Refine(nn.Module):
-    # set up Conv sequence with FiLM layers
-    # FiLM layer output channels == input channels in that layer
-
-    def __init__(
-        self,
-        in_channels,
-        out_channels,
-        time_embedding_dim,
-        kernel_size=3,
-        dropout_factor=0.0,
-    ):
-        super().__init__()
-
-        self.conv_1 = nn.Conv2d(
-            in_channels, out_channels, kernel_size=kernel_size, padding=1, bias=False
-        )
-
-        self.film = FiLM_Layer(
-            out_channels, time_embedding_dim
-        )  # self.film = same # of channels as out_channels
-
-        self.neuron_activation = nn.ReLU(inplace=True)
-
-        self.conv_2 = nn.Conv2d(
-            in_channels, out_channels, kernel_size=kernel_size, padding=1, bias=False
-        )
-
-        self.dropout = nn.Dropout2d(p=dropout_factor)
-
-        self.shuffle = nn.PixelShuffle(upscale_factor=2)
-
-    def forward(self, x, time_emb):
-        # first conv
-        x = self.conv_1(x)
-        x = self.film(x, time_emb)
-        x = self.shuffle(x)
-        x = self.neuron_activation(x)
-
-        # second
-        x = self.conv_2(x)
-        x = self.film(x, time_emb)
-        x = self.shuffle(x)
-        x = self.neuron_activation(x)
-
-        x = self.dropout(x)
-
-        return x
-
-
 class FiLM_Layer(nn.Module):
     # https://arxiv.org/pdf/1709.07871
     # take as input a dense embedding representing our time vector (day/hour harmonics)
@@ -396,6 +346,44 @@ class FiLM_Layer(nn.Module):
 
         # apply transformation to feature map: out = (1 + scale) * x + shift
         return (1 + scale) * x + shift
+
+
+class FiLM_DoubleConv(nn.Module):
+
+    # set up Conv sequence with FiLM layers
+    # FiLM layer output channels == input channels in that layer
+
+    def __init__(self, in_channels, out_channels, time_embedding_dim, kernel_size=3, dropout_factor=0.0):
+        super().__init__()
+
+        self.conv_batch_1 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels)
+        )
+        self.film1 = FiLM_Layer(out_channels, time_embedding_dim) # self.film = same # of channels as out_channels
+        self.film2 = FiLM_Layer(out_channels, time_embedding_dim)
+        self.neuron_activation = nn.ReLU(inplace=True)
+        self.conv_batch_2 = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels)
+        )
+
+        self.dropout = nn.Dropout2d(p=dropout_factor)
+
+    def forward(self, x, time_emb):
+        # first conv
+        x = self.conv_batch_1(x)
+        x = self.film1(x, time_emb)
+        x = self.neuron_activation(x)
+
+        #second
+        x = self.conv_batch_2(x)
+        x = self.film2(x, time_emb)
+        x = self.neuron_activation(x)
+
+        x = self.dropout(x)
+
+        return x
 
 
 class Downscale_Model(nn.Module):
@@ -429,65 +417,36 @@ class Downscale_Model(nn.Module):
         layer = 0
         while layer <= n_conv_layers:
             self.conv_hidden.append(DoubleConv(features, features, kernel_size))
+            #self.conv_hidden.append(FiLM_DoubleConv(features, features, time_embedding_dim, kernel_size, dropout_factor))
             layer += 1
 
-        # now pixel shuffle to as close as we can get to CONUS grid size == 3 upscalings
-        # pixel shuffle works by decreasing channels while increasing image size
-        #
-        # C_out = C_in / upscale_factor^2
-        # H_out = H_in * upscale_factor
-        # W_out = W_in * upscale_factor
+        self.film_conv = FiLM_DoubleConv(features, features, time_embedding_dim, kernel_size, dropout_factor)
 
-        # refine block is 2x conv --> insert time embeddings --> pixel shuffle --> activate
-
-        self.refine = FiLM_Refine(
-            features,
-            256,
-            time_embedding_dim,
-            kernel_size=kernel_size,
-            dropout_factor=dropout_factor,
-        )
-
-        # finally, to get to NBM CONUS shape, need to use Upsample, which interpolates to arbitrary shape
-        self.full_size = nn.Upsample(
-            size=(self.ny, self.nx), mode="bicubic", align_corners=False
-        )
-
-        # Transform from feature map space back to QPF
-        # Use softplus activation function to ensure prediction is always >= 0
-        # since target = log1p(ratio)
         self.final = nn.Sequential(
-            nn.Conv2d(features, out_channels, kernel_size=1), nn.Softplus()
-        )
+            nn.Conv2d(features, out_channels, kernel_size=1), nn.Softplus())
 
     def forward(self, input_data, time_vector):
-        print("[DOWNSCALER]: In forward pass")
+
         batch_size = input_data.shape[0]
         pos_emb = self.pos_emb.expand(batch_size, -1, -1, -1)
         time_emb = self.time_emb(time_vector)
 
         x = torch.cat([input_data, pos_emb], dim=1)
-        print("[DOWNSCALER]: Formatted input tensor")
-        
-        print("[DOWNSCALER]: 1st conv")
+
+
         # expand feature dimensions from 4 --> n features
         x = self.conv_input(x)
-        print("[DOWNSCALER]: ... done")
+
         # now do series of convolutions, keeping feature density the same
-        print("[DOWNSCALER]: Hidden layers")
         for conv_block in self.conv_hidden:
             x = conv_block(x)
-            print("[DOWNSCALER]: ... done")
 
-        # perform pixel shuffles
-        x_refined = self.refine(x, time_emb)
-        print("[DOWNSCALER]: Refined")
+        # include valid date info
+        x_refined = self.film_conv(x, time_emb)
 
-        # upsample to final grid size
-        x_full_size = self.full_size(x_refined)
-        print("[DOWNSCALER]: full size.")
+        # return final activation map
+        return self.final(x_refined)    
 
-        return self.final(x_full_size)
 
 
 def init_model(**kwargs):
