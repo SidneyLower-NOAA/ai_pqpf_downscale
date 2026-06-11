@@ -98,6 +98,15 @@ if __name__ == "__main__":
     refDate=pd.to_datetime(PDY+cyc, format='%Y%m%d%H')
     
     LEAD_TIME = int(sys.argv[1])
+
+    # SG smoothing will be optional
+    # User can ovveride
+    if len(sys.argv) == 3:
+        SMOOTHING = int(sys.argv[2])
+        sm_v = 'YES'
+    else:
+        SMOOTHING = False
+        sm_v = 'NO'
     
 
     # handle output formatting
@@ -117,6 +126,7 @@ if __name__ == "__main__":
     print(f"              REF DATE: {refDate}")
     print(f"              INPUT DATA: {DATA_IN}")
     print(f"              OUTPUT FILE: {output_file}")
+    print(f"              SMOOTHING?: {sm_v}")
     print(f"              NCPUS FOR UNET: {model_threads}")
     
     # get 2.5km grid
@@ -153,7 +163,7 @@ if __name__ == "__main__":
 
     ###  Save to zarr
     print("... Saving data")
-    write_high_res_ds(collate_outputs.squeeze(1).numpy(), percentiles, latitude, longitude, refDate, LEAD_TIME, output_file)
+    write_high_res_ds(collate_outputs.squeeze(1).numpy(), percentiles, latitude, longitude, refDate, LEAD_TIME, output_file, SMOOTHING)
     print(f"... Finished writing Zarr: {output_file}")
 
     

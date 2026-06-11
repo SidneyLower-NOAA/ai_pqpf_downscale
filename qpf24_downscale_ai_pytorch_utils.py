@@ -72,19 +72,6 @@ def load_qpf_data(data_path: str):
 
     return da
 
-def feather_cliff_edges(ai_data, threshold=0.254, decay_rate=0.02):
-    """
-    Finds the blunt cliff edges in the AI PQPF data smooths them out with an exponential 
-    physical decay tail matching the MRMS edge topology.
-    """
-    rain_mask = ai_data > threshold
-    distance_map = ndimage.distance_transform_edt(rain_mask)
-    feather_multiplier = 1.0 - np.exp(-distance_map * decay_rate)
-    feathered_data = ai_data * feather_multiplier
-    feathered_data[~rain_mask] = 0.0
-    
-    return feathered_data
-
             
 class xr_to_tensor(torch.utils.data.Dataset):
     def __init__(self, percentile_data: xr.DataArray,
@@ -123,7 +110,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
         interp20_to_2p5 = np.nan_to_num(self.da.isel(percentiles=idx).values, 0.0)
         valid_date = pd.to_datetime(self.da.validDate.values)
 
-        logp1_feature = np.log1p(feather_cliff_edges(interp20_to_2p5))
+        logp1_feature = np.log1p(soften_edges(interp20_to_2p5))
         normalized_feature = (logp1_feature - self.precip_mean) / self.precip_std
 
         # add timing tensors
@@ -151,8 +138,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
 
 # Write out to Zarr
 def write_high_res_ds(
-    hires_output, percentiles, latitude, longitude, ref_date, lead_time, output_file,
-):
+    hires_output, percentiles, latitude, longitude, ref_date, lead_time, output_file, SMOOTHING):
 
     sort_idx = percentiles.argsort()
 
@@ -165,9 +151,14 @@ def write_high_res_ds(
     output_sorted = hires_output[sort_idx]
     percentiles_sorted = percentiles[sort_idx]
 
-    output_smoothed = np.zeros_like(output_sorted)
-    for grid in range(len(percentiles)):
-        output_smoothed[grid] = sgolay2d(output_sorted[grid], 11, 3)
+    # OPTIONAL SMOOTHING
+    if SMOOTHING:
+        print(" ***** APPLYING SG SMOOTHING TO OUTPUT ***** ")
+        output_smoothed = np.zeros_like(output_sorted)
+        for grid in range(len(percentiles)):
+            output_smoothed[grid] = sgolay2d(output_sorted[grid], 25, 3)
+    else:
+        output_smoothed = output_sorted
     
     # write out
     da = xr.DataArray(
@@ -187,6 +178,32 @@ def write_high_res_ds(
     da.name = 'pqpf24_percentile_prediction'
     da.to_zarr(output_file, mode="w")
     return
+
+def soften_edges(da, noise_std=5., blur_sigma=5., decay_rate=0.02, threshold=0.26):
+    """
+    Adds small amount of Gaussian noise to create a dither effect to mirror MRMS noise structure better
+    Then softens the edges with an exponential decay towards 0 depending on distance from precip boundary
+    This effectively feathers out the gradient and reduces numerical artefacts when input into downscaler
+    """
+
+    rain_mask_noise = da > 0.
+    noise = ndimage.gaussian_filter(np.random.normal(0, noise_std, da.shape), blur_sigma) * rain_mask_noise
+    dithered_data = da + noise
+    
+    smoothed_data = np.clip(dithered_data, a_min=0.0, a_max=None)
+    smoothed_data[~rain_mask_noise] = 0.0
+
+
+    # Softening profile for the outer regions of precip
+    # Preserves inner layers, with pixels nearer to edges get 
+    # progressively scaled down to form a smooth curve
+    rain_mask_decay = smoothed_data > threshold
+    distance_map = ndimage.distance_transform_edt(rain_mask_decay)
+    feather_multiplier = 1.0 - np.exp(-distance_map * decay_rate)
+
+    feathered_data = smoothed_data * feather_multiplier
+    
+    return feathered_data
 
 
 # Smoothing (stolen from Eric) :)
