@@ -13,6 +13,7 @@ import os
 from qpf24_downscale_ai_pytorch_utils import load_constants, load_qpf_data, xr_to_tensor, init_model, write_high_res_ds
 
 # Force ALL underlying libraries to use exactly 1 thread per process
+# Pytorch will make its own processes
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -40,7 +41,7 @@ def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collat
     if rank == 1:
         print("... Loading downscale model and setting weights")
     #model_name = 'PQPF_downscale_model_trained_state'
-    model_name = 'PQPF_downscale_MRMS_VERSION2'
+    model_name = 'PQPF_downscale_model_trained_state'
     saved_state = torch.load(f"{FIXblend}/AI/precip/{model_name}.pth", map_location='cpu')
     in_channels = saved_state['model_args']['in_channels']
     features = saved_state['model_args']['n_features_max']

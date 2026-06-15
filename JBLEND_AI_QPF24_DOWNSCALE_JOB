@@ -11,9 +11,9 @@ set -x
 ########################################
 export DATA=${DATA:-${DATAROOT:?}/${jobid:?}}
 export pid=${pid:-${jobid:?}}
-#mkdir -p $DATA
-#cd $DATA
-#export TMPDIR=$DATA
+mkdir -p $DATA
+cd $DATA
+export TMPDIR=$DATA
 
 ####################################
 # Specify NET Name and RUN
@@ -38,7 +38,7 @@ export PARMblend=${PARMblend:-${HOMEblend}/parm}
 export EXECblend=${EXECblend:-${HOMEblend}/exec}
 export UTILblend=${UTILblend:-${HOMEblend}/ush/util}
 export USHblend=${USHblend:-${HOMEblend}/ush}
-#export ARCHIVEblend=${ARCHIVEblend:-${$ARCHIVEblend}/archive_blend}
+export ARCHIVEblend=${ARCHIVEblend:-${$ARCHIVEblend}/archive_blend}
 ########################################
 # SET THE DATE VARIABLES           
 ########################################
@@ -49,13 +49,13 @@ setpdy.sh 12 1
 ########################################
 # SET THE INPUT DIRECTORIES             
 ########################################
-#export COMINblendbase=${COMINblendbase:-$(compath.py -o ${NET}/${blend_ver})}
-#export COMIN=${COMIN:-${COMINblendbase:?}}/blend.${PDY}/$cyc/modeldata
+export COMINblendbase=${COMINblendbase:-$(compath.py -o ${NET}/${blend_ver})}
+export COMIN=${COMIN:-${COMINblendbase:?}}/blend.${PDY}/$cyc/modeldata
 
 ########################################
 # SET THE OUTPUT DIRECTORIES             
 ########################################
-#export COMOUTblendbase=${COMOUTblendbase:-$(compath.py -o ${NET}/${blend_ver})}
+export COMOUTblendbase=${COMOUTblendbase:-$(compath.py -o ${NET}/${blend_ver})}
 export COMOUT=${COMOUT:-${COMOUTblendbase:?}}/blend.$PDY/$cyc/modeldata
 mkdir -m 755 -p $COMOUT
 
