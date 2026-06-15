@@ -176,6 +176,9 @@ def write_high_res_ds(
                     )
 
     da.name = 'pqpf24_percentile_prediction'
+    if SMOOTHING:
+        da.attrs['smoothing_details']="SG smoothing window=25, order=3"
+        
     da.to_zarr(output_file, mode="w")
     return
 

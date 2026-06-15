@@ -40,12 +40,17 @@ export USHblend=${USHblend:-${HOMEblend}/ush}
 ########################################
 # SET THE DATE VARIABLES           
 ########################################
-export cyc="00"
-export cycle=${cycle:-t${cyc}z}
-export PDY=$(date -d "yesterday" '+%Y%m%d')
-echo $PDY
+#export cyc="00"
+#export cycle=${cycle:-t${cyc}z}
+#export PDY=$(date -d "yesterday" '+%Y%m%d')
+#echo $PDY
 
 LEAD_TIME=$1
+export PDY=$2
+export cyc=$3
+
+export cycle=${cycle:-t${cyc}z}
+
 
 export COMIN=${COMIN:-${COMINblendbase:?}}/blend.${PDY}/$cyc/modeldata
 export COMOUTblendbase=${COMOUTblendbase:-$(compath.py -o ${NET}/${blend_ver})}

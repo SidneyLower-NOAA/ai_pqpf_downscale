@@ -50,7 +50,7 @@ def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collat
 
     ### process data
     if rank == 1:
-        print("... Loading data")
+        print("... Loading data into pytorch")
     input_data_tensors = xr_to_tensor(percentile_da, nml_qpf_mean, nml_qpf_std,terrain_20km, terrain_2p5km)
     sampler = DistributedSampler(input_data_tensors, num_replicas=world_size, rank=rank, shuffle=False)
     input_data_loader = torch.utils.data.DataLoader(input_data_tensors, batch_size=batch_size, sampler=sampler, num_workers=0)
@@ -58,19 +58,20 @@ def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collat
     ### run inference
     percentiles = percentiles.tolist()
     downscale_model.eval() 
+    if rank == 1:
+        print("... Starting inference")
     with torch.no_grad(): 
         ncount = 0
         for low_res_input, time_vector, grid20, percentile in input_data_loader:
-            print(f"     Rank {rank} starting forward pass...")
+            print(f"     Process {rank} starting")
             output_batch = downscale_model(low_res_input, time_vector)
-            print(f"     Rank {rank} finished with forward pass")
             per_list = percentile.tolist()
             for out in range(len(output_batch)):
+                print(f"     ... {per_list[out]}th percentile downscaled.")
                 this_per = percentiles.index(per_list[out])
                 collate_outputs[this_per] = torch.expm1(output_batch[out].squeeze(0).squeeze(0)) * grid20[out]
                 ncount += 1
 
-    print(f"     Rank {rank} done with writing to shared tensor")
     dist.destroy_process_group()
 
     return
@@ -113,7 +114,7 @@ if __name__ == "__main__":
     DATA_IN = f'{COMIN}/AI_percentile_predictions_pqpf24_{PDY}{cyc}_{LEAD_TIME}h_2layer_10cat_35epocs_early_stop_2p5km.zarr'
     filename = os.path.basename(DATA_IN).split('.')[0]
     data_format = os.path.basename(DATA_IN).split('.')[-1]
-    output_file = DATA_OUT_DIR + f"{filename}_downscaled.{data_format}"
+    output_file = DATA_OUT_DIR + f"/{filename}_downscaled.{data_format}"
     # just in case
     if data_format not in ['grib2', 'zarr']:
         raise TypeError(f"Cannot process data of type {data_format}. Must be GRIB2 or Zarr")
@@ -139,7 +140,7 @@ if __name__ == "__main__":
     percentiles = np.array([5,10,20,25,30,40,50,60,70,75,80,90,95])
     ny, nx = np.shape(longitude) 
 
-    print("... Grabbing constant grids")
+    print("... Grabbing constants and percentile data")
     percentile_da = load_qpf_data(DATA_IN)
     nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km = load_constants(FIXblend)
     os_vars = [FIXblend, (ny, nx), percentiles, batch_size]
@@ -159,12 +160,10 @@ if __name__ == "__main__":
         join=True
     )
 
-    print(f"[DEBUG]: output size: {collate_outputs.squeeze(1).size()}")
-
     ###  Save to zarr
     print("... Saving data")
     write_high_res_ds(collate_outputs.squeeze(1).numpy(), percentiles, latitude, longitude, refDate, LEAD_TIME, output_file, SMOOTHING)
-    print(f"... Finished writing Zarr: {output_file}")
+    print(f"     writing to Zarr: {output_file}")
 
     
     f = pd.Timestamp.now()
