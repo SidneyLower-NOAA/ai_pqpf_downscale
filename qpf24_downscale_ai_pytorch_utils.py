@@ -72,14 +72,41 @@ def load_qpf_data(data_path: str):
 
     return da
 
+def pad_grid(image, add_pixels=12):
+
+    # Pad grids with reflect mode to avoid edge effects
+    # we'll crop back down to CONUS size when we write the 
+    # output
+
+    #input tensor will be of shape [N channels, H, W]
+    h, w = image.shape[1], image.shape[2]
+    
+    # Calculate new height/width
+    new_h = h+add_pixels #int(np.ceil(h / divisor)) * divisor
+    new_w = w+add_pixels #int(np.ceil(w / divisor)) * divisor
+    
+    # Calculate padding needed (left, right, top, bottom)
+    pad_left = (new_w - w) // 2
+    pad_right = (new_w - w) - pad_left
+    pad_top = (new_h - h) // 2
+    pad_bottom = (new_h - h) - pad_top
+    
+    # Apply padding
+    # Format: (padding_left, padding_right, padding_top, padding_bottom)
+    padded_image = torch.nn.functional.pad(image, (pad_left, pad_right, pad_top, pad_bottom), mode='reflect')
+    
+    return padded_image
+
             
 class xr_to_tensor(torch.utils.data.Dataset):
     def __init__(self, percentile_data: xr.DataArray,
                  qpe_stats_mean: np.array, qpe_stats_std: np.array,
-                 terrain_20km: np.array, terrain_2p5km: np.array):
+                 terrain_20km: np.array, terrain_2p5km: np.array,
+                grid_padding: int):
 
         
         self.da = percentile_data
+        self.grid_padding = grid_padding
 
         # the way this will run is each lead time has its own task
         # BUT we want to process all percentiles, so n_samples
@@ -134,7 +161,9 @@ class xr_to_tensor(torch.utils.data.Dataset):
             [feature_tensor, self.highres_features, self.elev_diff], dim=0
         )
 
-        return combined_features, time_vector, interp20_to_2p5, percentile
+        padded_features = pad_grid(combined_features, add_pixels=self.grid_padding)
+
+        return padded_features, time_vector, interp20_to_2p5, percentile
 
 # Write out to Zarr
 def write_high_res_ds(
@@ -160,7 +189,7 @@ def write_high_res_ds(
     
     output_smoothed = np.zeros_like(output_sorted)
     for grid in range(len(percentiles)):
-        sm = smooth_output(output_sorted[grid], terrain, 8.)
+        sm = smooth_output(output_sorted[grid],percentiles_sorted[grid], terrain, 8., 0.08)
         sm = np.where(sm < 0.26, 0.0, sm)
         output_smoothed[grid] = sm
     
@@ -210,7 +239,7 @@ def soften_edges(da, noise_std=5., blur_sigma=5., decay_rate=0.02, threshold=0.2
     
     return feathered_data
 
-def smooth_output(da, terrain, smoothing_sigma=3, decay_rate=0.08):
+def smooth_output(da, percentile, terrain, smoothing_sigma=3, decay_rate=0.08):
 
     """
     Terrain aware smoothing for light precip. Gets rids of excess concentration of rain the downscaler
@@ -231,7 +260,8 @@ def smooth_output(da, terrain, smoothing_sigma=3, decay_rate=0.08):
     smoothed = ndimage.gaussian_filter(qpf_data*feather_multiplier, sigma=smoothing_sigma) 
     
     qpf = (smoothed * (1 - topo)) + (qpf_data * topo)
-    qpf = np.where(qpf < 12.5, qpf, da)
+    smoothing_lim = np.max([12.5, 12.5*(percentile/50.)])
+    qpf = np.where(qpf < smoothing_lim, qpf, da)
 
     return qpf
 
@@ -445,13 +475,18 @@ class Downscale_Model(nn.Module):
         input_time_dim=4,
         time_embedding_dim=128,
         pos_emb_dim=16,
+        grid_padding=12,
         dropout_factor=0.0,
     ):
         super(Downscale_Model, self).__init__()
 
         self.ny, self.nx = grid_dims
-        self.pos_emb = nn.Parameter(torch.randn(1, pos_emb_dim, self.ny, self.nx))
+
         self.time_emb = Time_Embedding(input_time_dim, time_embedding_dim)
+
+        padded_h = self.ny + grid_padding
+        padded_w = self.nx + grid_padding
+        self.pos_emb = nn.Parameter(torch.randn(1, pos_emb_dim, padded_h, padded_w))
 
         total_in_channels = in_channels + pos_emb_dim
 
