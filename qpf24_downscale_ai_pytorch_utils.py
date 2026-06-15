@@ -138,7 +138,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
 
 # Write out to Zarr
 def write_high_res_ds(
-    hires_output, percentiles, latitude, longitude, ref_date, lead_time, output_file, SMOOTHING):
+    hires_output, percentiles, latitude, longitude, ref_date, lead_time, output_file):
 
     sort_idx = percentiles.argsort()
 
@@ -151,14 +151,18 @@ def write_high_res_ds(
     output_sorted = hires_output[sort_idx]
     percentiles_sorted = percentiles[sort_idx]
 
-    # OPTIONAL SMOOTHING
-    if SMOOTHING:
-        print(" ***** APPLYING SG SMOOTHING TO OUTPUT ***** ")
-        output_smoothed = np.zeros_like(output_sorted)
-        for grid in range(len(percentiles)):
-            output_smoothed[grid] = sgolay2d(output_sorted[grid], 25, 3)
-    else:
-        output_smoothed = output_sorted
+
+    # smooth light precip
+    FIXblend=os.getenv("FIXblend")
+    terrain_file=FIXblend+'/precip/blend.precip_const.co.2p5.nc'
+    terrain_ds = xr.open_dataset(terrain_file)
+    terrain = terrain_ds.terrain.values
+    
+    output_smoothed = np.zeros_like(output_sorted)
+    for grid in range(len(percentiles)):
+        sm = smooth_output(output_sorted[grid], terrain, 8.)
+        sm = np.where(sm < 0.26, 0.0, sm)
+        output_smoothed[grid] = sm
     
     # write out
     da = xr.DataArray(
@@ -176,8 +180,6 @@ def write_high_res_ds(
                     )
 
     da.name = 'pqpf24_percentile_prediction'
-    if SMOOTHING:
-        da.attrs['smoothing_details']="SG smoothing window=25, order=3"
         
     da.to_zarr(output_file, mode="w")
     return
@@ -207,6 +209,31 @@ def soften_edges(da, noise_std=5., blur_sigma=5., decay_rate=0.02, threshold=0.2
     feathered_data = smoothed_data * feather_multiplier
     
     return feathered_data
+
+def smooth_output(da, terrain, smoothing_sigma=3, decay_rate=0.08):
+
+    """
+    Terrain aware smoothing for light precip. Gets rids of excess concentration of rain the downscaler
+    has a tendency to impart on regions of light precip. Creates smoothed terrain gradient weighted mask.
+    Then smooths output with a precip-boundary aware mask, similar to what's done in soften_edges fun. 
+    Combines smoothed and raw QPF for final result.
+    """
+    v_gradient, u_gradient = np.gradient(terrain)
+    topo = ndimage.gaussian_filter(np.absolute(v_gradient) + np.absolute(u_gradient), sigma=smoothing_sigma) / smoothing_sigma
+    topo = topo.clip(0.0,100.0) / 100
+    #topo is now mask between 0 and 1; 0 = smooth terrain, 1 = high terrain gradient region
+    
+    qpf_data = np.where(da < 0.26, 0.0, da)
+    rain_mask = qpf_data > 0.
+    distance_map = ndimage.distance_transform_edt(rain_mask)
+    feather_multiplier = 1.0 - np.exp(-distance_map * decay_rate)
+
+    smoothed = ndimage.gaussian_filter(qpf_data*feather_multiplier, sigma=smoothing_sigma) 
+    
+    qpf = (smoothed * (1 - topo)) + (qpf_data * topo)
+    qpf = np.where(qpf < 12.5, qpf, da)
+
+    return qpf
 
 
 # Smoothing (stolen from Eric) :)
