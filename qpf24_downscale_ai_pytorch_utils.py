@@ -137,7 +137,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
         interp20_to_2p5 = np.nan_to_num(self.da.isel(percentiles=idx).values, 0.0)
         valid_date = pd.to_datetime(self.da.validDate.values)
 
-        logp1_feature = np.log1p(soften_edges(interp20_to_2p5))
+        logp1_feature = np.log1p(interp20_to_2p5)
         normalized_feature = (logp1_feature - self.precip_mean) / self.precip_std
 
         # add timing tensors
@@ -165,6 +165,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
 
         return padded_features, time_vector, interp20_to_2p5, percentile
 
+
 # Write out to Zarr
 def write_high_res_ds(
     hires_output, percentiles, latitude, longitude, ref_date, lead_time, output_file):
@@ -189,9 +190,7 @@ def write_high_res_ds(
     
     output_smoothed = np.zeros_like(output_sorted)
     for grid in range(len(percentiles)):
-        sm = smooth_output(output_sorted[grid],percentiles_sorted[grid], terrain, 8., 0.08)
-        sm = np.where(sm < 0.26, 0.0, sm)
-        output_smoothed[grid] = sm
+        output_smoothed[grid] = smooth_output(output_sorted[grid],percentiles_sorted[grid], terrain, 3.)
     
     # write out
     da = xr.DataArray(
@@ -213,55 +212,21 @@ def write_high_res_ds(
     da.to_zarr(output_file, mode="w")
     return
 
-def soften_edges(da, noise_std=5., blur_sigma=5., decay_rate=0.02, threshold=0.26):
-    """
-    Adds small amount of Gaussian noise to create a dither effect to mirror MRMS noise structure better
-    Then softens the edges with an exponential decay towards 0 depending on distance from precip boundary
-    This effectively feathers out the gradient and reduces numerical artefacts when input into downscaler
-    """
 
-    rain_mask_noise = da > 0.
-    noise = ndimage.gaussian_filter(np.random.normal(0, noise_std, da.shape), blur_sigma) * rain_mask_noise
-    dithered_data = da + noise
-    
-    smoothed_data = np.clip(dithered_data, a_min=0.0, a_max=None)
-    smoothed_data[~rain_mask_noise] = 0.0
-
-
-    # Softening profile for the outer regions of precip
-    # Preserves inner layers, with pixels nearer to edges get 
-    # progressively scaled down to form a smooth curve
-    rain_mask_decay = smoothed_data > threshold
-    distance_map = ndimage.distance_transform_edt(rain_mask_decay)
-    feather_multiplier = 1.0 - np.exp(-distance_map * decay_rate)
-
-    feathered_data = smoothed_data * feather_multiplier
-    
-    return feathered_data
-
-def smooth_output(da, percentile, terrain, smoothing_sigma=3, decay_rate=0.08):
+def smooth_output(da, terrain, smoothing_sigma=3):
 
     """
-    Terrain aware smoothing for light precip. Gets rids of excess concentration of rain the downscaler
-    has a tendency to impart on regions of light precip. Creates smoothed terrain gradient weighted mask.
-    Then smooths output with a precip-boundary aware mask, similar to what's done in soften_edges fun. 
-    Combines smoothed and raw QPF for final result.
+    Terrain aware smoothing to remedy some of the artefacts inhereted from the 20km grids. 
     """
     v_gradient, u_gradient = np.gradient(terrain)
     topo = ndimage.gaussian_filter(np.absolute(v_gradient) + np.absolute(u_gradient), sigma=smoothing_sigma) / smoothing_sigma
     topo = topo.clip(0.0,100.0) / 100
     #topo is now mask between 0 and 1; 0 = smooth terrain, 1 = high terrain gradient region
     
-    qpf_data = np.where(da < 0.26, 0.0, da)
-    rain_mask = qpf_data > 0.
-    distance_map = ndimage.distance_transform_edt(rain_mask)
-    feather_multiplier = 1.0 - np.exp(-distance_map * decay_rate)
-
-    smoothed = ndimage.gaussian_filter(qpf_data*feather_multiplier, sigma=smoothing_sigma) 
+    smoothed = ndimage.gaussian_filter(da, sigma=smoothing_sigma) 
     
-    qpf = (smoothed * (1 - topo)) + (qpf_data * topo)
-    smoothing_lim = np.max([12.5, 12.5*(percentile/50.)])
-    qpf = np.where(qpf < smoothing_lim, qpf, da)
+    qpf = (smoothed * (1 - topo)) + (da * topo)
+    qpf = np.where(qpf < 0.254, 0.0, qpf)
 
     return qpf
 

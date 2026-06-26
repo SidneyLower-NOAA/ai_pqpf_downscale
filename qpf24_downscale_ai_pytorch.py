@@ -24,9 +24,8 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collate_outputs: torch.tensor):
 
 
-    FIXblend, (ny, nx), percentiles, batch_size, grid_padding = os_vars
+    FIXblend, (ny, nx), percentiles, batch_size = os_vars
     percentile_da, nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km = para_vars
-    pad_ = grid_padding//2
 
     
     if rank == 1:
@@ -47,6 +46,7 @@ def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collat
     in_channels = saved_state['model_args']['in_channels']
     features = saved_state['model_args']['n_features_max']
     n_conv_layers = saved_state['model_args']['n_conv_layers']
+    grid_padding = saved_state['model_args']['grid_padding']
     downscale_model = init_model(grid_dims=(ny, nx),in_channels=in_channels,features=features,n_conv_layers=n_conv_layers,grid_padding=grid_padding)
     downscale_model.load_state_dict(saved_state['model_state_dict'])
 
@@ -73,7 +73,7 @@ def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collat
                 this_per = percentiles.index(per_list[out])
                 # get QPF by multiplying downscale tensor by 20km resolution QPF
                 # also crop to CONUS size to get rid of padded pixels
-                collate_outputs[this_per] = torch.expm1(output_batch[out].squeeze(0).squeeze(0)[pad_:ny+pad_, pad_:nx+pad_]) * grid20[out]
+                collate_outputs[this_per] = torch.expm1(output_batch[out].squeeze(0).squeeze(0)[grid_padding:ny+grid_padding, :nx]) * grid20[out]
                 ncount += 1
 
     dist.destroy_process_group()
@@ -133,12 +133,11 @@ if __name__ == "__main__":
     # load data (constants + percentiles)
     percentiles = np.array([5,10,20,25,30,40,50,60,70,75,80,90,95])
     ny, nx = np.shape(longitude) 
-    grid_padding = 12
 
     print("... Grabbing constants and percentile data")
     percentile_da = load_qpf_data(DATA_IN)
     nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km = load_constants(FIXblend)
-    os_vars = [FIXblend, (ny, nx), percentiles, batch_size, grid_padding]
+    os_vars = [FIXblend, (ny, nx), percentiles, batch_size]
     para_vars = [percentile_da, nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km]
 
     # output
