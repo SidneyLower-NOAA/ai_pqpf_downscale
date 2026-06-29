@@ -190,7 +190,7 @@ def write_high_res_ds(
     
     output_smoothed = np.zeros_like(output_sorted)
     for grid in range(len(percentiles)):
-        output_smoothed[grid] = smooth_output(output_sorted[grid],percentiles_sorted[grid], terrain, 3.)
+        output_smoothed[grid] = smooth_output(output_sorted[grid],terrain, [25.4, 6.35], [5, 9])
     
     # write out
     da = xr.DataArray(
@@ -213,21 +213,20 @@ def write_high_res_ds(
     return
 
 
-def smooth_output(da, terrain, smoothing_sigma=3):
+def smooth_only_light_precip(da, terrain, precip_thresh=[6.35, 2.54], smoothing_sigma=[3, 5]):
 
-    """
-    Terrain aware smoothing to remedy some of the artefacts inhereted from the 20km grids. 
-    """
+    # smooth all, terrain-aware
     v_gradient, u_gradient = np.gradient(terrain)
-    topo = ndimage.gaussian_filter(np.absolute(v_gradient) + np.absolute(u_gradient), sigma=smoothing_sigma) / smoothing_sigma
+    topo = ndimage.gaussian_filter(np.absolute(v_gradient) + np.absolute(u_gradient), sigma=smoothing_sigma[0]) / smoothing_sigma[0]
     topo = topo.clip(0.0,100.0) / 100
-    #topo is now mask between 0 and 1; 0 = smooth terrain, 1 = high terrain gradient region
-    
-    smoothed = ndimage.gaussian_filter(da, sigma=smoothing_sigma) 
-    
-    qpf = (smoothed * (1 - topo)) + (da * topo)
-    qpf = np.where(qpf < 0.254, 0.0, qpf)
+    smoothed = ndimage.gaussian_filter(da, sigma=smoothing_sigma[0]) 
+    topo_smooth = (smoothed * (1 - topo)) + (da * topo)
+    qpf = np.where(topo_smooth > (precip_thresh[0]), da, topo_smooth)
 
+    #smooth light - don't consider terrain
+    smoothed = ndimage.gaussian_filter(da, sigma=smoothing_sigma[1]) 
+    qpf = np.where(qpf < precip_thresh[1], smoothed, qpf)
+    
     return qpf
 
 
