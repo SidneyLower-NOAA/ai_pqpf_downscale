@@ -213,7 +213,7 @@ def write_high_res_ds(
     return
 
 
-def smooth_only_light_precip(da, terrain, precip_thresh=[6.35, 2.54], smoothing_sigma=[3, 5]):
+def smooth_output(da, terrain, precip_thresh=[6.35, 2.54], smoothing_sigma=[3, 5]):
 
     # smooth all, terrain-aware
     v_gradient, u_gradient = np.gradient(terrain)
