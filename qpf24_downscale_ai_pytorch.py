@@ -47,7 +47,10 @@ def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collat
     features = saved_state['model_args']['n_features_max']
     n_conv_layers = saved_state['model_args']['n_conv_layers']
     grid_padding = saved_state['model_args']['grid_padding']
-    downscale_model = init_model(grid_dims=(ny, nx),in_channels=in_channels,features=features,n_conv_layers=n_conv_layers,grid_padding=grid_padding)
+    time_emb = saved_state['model_args']['time_emb_dim']
+    percentile_emb = saved_state['model_args']['percentile_emb_dim']
+    downscale_model = init_model(grid_dims=(ny, nx),in_channels=in_channels,features=features,n_conv_layers=n_conv_layers,
+                                 grid_padding=grid_padding,time_embedding_dim=time_emb,percentile_embedding_dim=percentile_emb)
     downscale_model.load_state_dict(saved_state['model_state_dict'])
 
     ### process data
@@ -73,7 +76,8 @@ def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collat
                 this_per = percentiles.index(per_list[out])
                 # get QPF by multiplying downscale tensor by 20km resolution QPF
                 # also crop to CONUS size to get rid of padded pixels
-                collate_outputs[this_per] = torch.expm1(output_batch[out].squeeze(0).squeeze(0)[grid_padding:ny+grid_padding, :nx]) * grid20[out]
+                collate_outputs[this_per, 0] = torch.expm1(output_batch[out].squeeze(0).squeeze(0)[grid_padding:ny+grid_padding, :nx]) * grid20[out]
+                collat_outputs[this_per, 1] = grid20[out]
                 ncount += 1
 
     dist.destroy_process_group()
@@ -141,7 +145,9 @@ if __name__ == "__main__":
     para_vars = [percentile_da, nml_qpf_mean, nml_qpf_std, terrain_20km, terrain_2p5km]
 
     # output
-    collate_outputs = torch.zeros((len(percentiles), 1, ny, nx))
+    # save both hires and lowres grids to this
+    # 0 = hires, 1 = lowres
+    collate_outputs = torch.zeros((len(percentiles), 2, ny, nx))
     
     
     # run model in parallel
@@ -156,7 +162,7 @@ if __name__ == "__main__":
 
     ###  Save to zarr
     print("... Saving data")
-    write_high_res_ds(collate_outputs.squeeze(1).numpy(), percentiles, latitude, longitude, refDate, LEAD_TIME, output_file)
+    write_high_res_ds(collate_outputs.numpy()[:,0], collate_outputs.numpy()[:,1], percentiles, latitude, longitude, refDate, LEAD_TIME, output_file)
     print(f"     writing to Zarr: {output_file}")
 
     

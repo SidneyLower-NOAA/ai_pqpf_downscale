@@ -135,6 +135,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
         percentile = self.percentiles[idx]
 
         interp20_to_2p5 = np.nan_to_num(self.da.isel(percentiles=idx).values, 0.0)
+        interp20_to_2p5 = np.clip(interp20_to_2p5, a_min=0.0, a_max=None)
         valid_date = pd.to_datetime(self.da.validDate.values)
 
         logp1_feature = np.log1p(interp20_to_2p5)
@@ -153,6 +154,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
         time_vector = torch.tensor(
             [sin_time, cos_time, ending_hour_sin, ending_hour_cos], dtype=torch.float32
         )
+        percentile_vector = torch.tensor([percentile], dtype=torch.float32)
         # shape [3, 2.5km H, 2.5km W]
         feature_tensor = torch.tensor(
             normalized_feature, dtype=torch.float32
@@ -163,12 +165,12 @@ class xr_to_tensor(torch.utils.data.Dataset):
 
         padded_features = pad_grid(combined_features, add_pixels=self.grid_padding)
 
-        return padded_features, time_vector, interp20_to_2p5, percentile
+        return padded_features, time_vector, percentile_vector interp20_to_2p5, percentile
 
 
 # Write out to Zarr
 def write_high_res_ds(
-    hires_output, percentiles, latitude, longitude, ref_date, lead_time, output_file):
+    hires_output, lowres_input, percentiles, latitude, longitude, ref_date, lead_time, output_file):
 
     sort_idx = percentiles.argsort()
 
@@ -179,6 +181,7 @@ def write_high_res_ds(
 
     # sort data arrays
     output_sorted = hires_output[sort_idx]
+    inputs_sorted = lowres_input[sort_idx]
     percentiles_sorted = percentiles[sort_idx]
 
 
@@ -190,7 +193,8 @@ def write_high_res_ds(
     
     output_smoothed = np.zeros_like(output_sorted)
     for grid in range(len(percentiles)):
-        output_smoothed[grid] = smooth_output(output_sorted[grid],terrain, [25.4, 6.35], [5, 9])
+        #smooth = np.where(hires_pred / lowres_pred > 10., lowres_pred, hires_pred)
+        output_smoothed[grid] = np.where(output_sorted[grid]/inputs_sorted[grid] > 10., inputs_sorted[grid], output_sorted[grid])
     
     # write out
     da = xr.DataArray(
@@ -314,6 +318,8 @@ UNLESS YOU KNOW _EXACTLY_ WHAT YOU'RE DOING
 ### -------------------------- ###
 
 class DoubleConv(nn.Module):
+    # encoder path (down the U)
+    # convolution, normalization, activation
 
     def __init__(self, in_channels, out_channels, kernel_size=3):
         super().__init__()
@@ -343,22 +349,25 @@ class DoubleConv(nn.Module):
         return self.double_conv(x)
 
 
-class Time_Embedding(nn.Module):
-    # transform time vector [day sin, day cos, hour sin, hour cos]
-    # into dense embedding, imbuing non linearity
+class Vector_Embedding(nn.Module):
+    # transform vector representing time [day sin, day cos, hour sin, hour cos]
+    # or percentile [25, 50, 75] into dense embedding, imbuing non linearity
 
-    def __init__(self, input_time_dim, time_embedding_dim):
+    def __init__(self, input_vector_dim, embedding_dim):
         super().__init__()
 
-        self.time_mlp = nn.Sequential(
-            nn.Linear(input_time_dim, time_embedding_dim // 2),
+        self.embedding_net = nn.Sequential(
+            nn.Linear(input_vector_dim, embedding_dim // 2),
             nn.ReLU(),
-            nn.Linear(time_embedding_dim // 2, time_embedding_dim),
+            nn.Linear(embedding_dim // 2, embedding_dim),
             nn.ReLU(),
         )
 
-    def forward(self, time_vector):
-        return self.time_mlp(time_vector)
+    def forward(self, vector):
+        # shape: [batch_size] -> needs to be [batch_size, 1]
+        if vector.dim() == 1:
+            vector = vector.unsqueeze(-1)
+        return self.embedding_net(vector) 
 
 
 class FiLM_Layer(nn.Module):
@@ -367,16 +376,16 @@ class FiLM_Layer(nn.Module):
     # pass this through a linear layer to generate 2 vectors that describe our affine transformation
     # of the time info onto the feature map
 
-    def __init__(self, num_features_in_layer, time_embedding_dim):
+    def __init__(self, num_features_in_layer, embedding_dim):
         super().__init__()
         # project time embedding into scale/shift params for this layer's channels
-        self.projection = nn.Linear(time_embedding_dim, num_features_in_layer * 2)
+        self.projection = nn.Linear(embedding_dim, num_features_in_layer * 2)
 
-    def forward(self, x, time_emb):
+    def forward(self, x, emb):
         # x: input tensor [Batch, Channels, Height, Width]
-        # time_emb: dense representation of time vector [Batch, time_embedding_dim]
+        # emb: dense representation of some vector [Batch, embedding_dim]
 
-        params = self.projection(time_emb)
+        params = self.projection(emb)
 
         # separate this tensor into 2 parameters: additive (shift) and multiplicative (scale)
         shift, scale = params.chunk(2, dim=1)
@@ -388,21 +397,20 @@ class FiLM_Layer(nn.Module):
         # apply transformation to feature map: out = (1 + scale) * x + shift
         return (1 + scale) * x + shift
 
-
 class FiLM_DoubleConv(nn.Module):
 
     # set up Conv sequence with FiLM layers
     # FiLM layer output channels == input channels in that layer
 
-    def __init__(self, in_channels, out_channels, time_embedding_dim, kernel_size=3, dropout_factor=0.0):
+    def __init__(self, in_channels, out_channels, embedding_dim, kernel_size=3, dropout_factor=0.0):
         super().__init__()
-
+        
         self.conv_batch_1 = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=1, bias=False),
             nn.BatchNorm2d(out_channels)
         )
-        self.film1 = FiLM_Layer(out_channels, time_embedding_dim) # self.film = same # of channels as out_channels
-        self.film2 = FiLM_Layer(out_channels, time_embedding_dim)
+        self.film1 = FiLM_Layer(out_channels, embedding_dim) # self.film = same # of channels as out_channels
+        self.film2 = FiLM_Layer(out_channels, embedding_dim)
         self.neuron_activation = nn.ReLU(inplace=True)
         self.conv_batch_2 = nn.Sequential(
             nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding=1, bias=False),
@@ -410,20 +418,20 @@ class FiLM_DoubleConv(nn.Module):
         )
 
         self.dropout = nn.Dropout2d(p=dropout_factor)
-
-    def forward(self, x, time_emb):
+    
+    def forward(self, x, emb):
         # first conv
         x = self.conv_batch_1(x)
-        x = self.film1(x, time_emb)
+        x = self.film1(x, emb)
         x = self.neuron_activation(x)
 
         #second
         x = self.conv_batch_2(x)
-        x = self.film2(x, time_emb)
+        x = self.film2(x, emb)
         x = self.neuron_activation(x)
 
         x = self.dropout(x)
-
+        
         return x
 
 
@@ -437,7 +445,9 @@ class Downscale_Model(nn.Module):
         n_conv_layers=3,
         kernel_size=3,
         input_time_dim=4,
+        input_percentile_dim=1,
         time_embedding_dim=128,
+        percentile_embedding_dim=64,
         pos_emb_dim=16,
         grid_padding=12,
         dropout_factor=0.0,
@@ -446,7 +456,8 @@ class Downscale_Model(nn.Module):
 
         self.ny, self.nx = grid_dims
 
-        self.time_emb = Time_Embedding(input_time_dim, time_embedding_dim)
+        self.time_emb = Vector_Embedding(input_time_dim, time_embedding_dim)
+        self.perc_emb = Vector_Embedding(input_percentile_dim, percentile_embedding_dim)
 
         padded_h = self.ny + grid_padding
         padded_w = self.nx + grid_padding
@@ -463,22 +474,24 @@ class Downscale_Model(nn.Module):
         layer = 0
         while layer <= n_conv_layers:
             self.conv_hidden.append(DoubleConv(features, features, kernel_size))
-            #self.conv_hidden.append(FiLM_DoubleConv(features, features, time_embedding_dim, kernel_size, dropout_factor))
             layer += 1
 
-        self.film_conv = FiLM_DoubleConv(features, features, time_embedding_dim, kernel_size, dropout_factor)
+        # now do 2 film layers to inject conditional features w.r.t time and percentile
+        self.film_conv_time = FiLM_DoubleConv(features, features, time_embedding_dim, kernel_size, dropout_factor)
+        self.film_conv_percentile = FiLM_DoubleConv(features, features, percentile_embedding_dim, kernel_size, dropout_factor)
 
+        # Transform from feature map space back to QPF
+        # Use softplus activation function to ensure prediction is always >= 0
+        # since target = log1p(ratio)
         self.final = nn.Sequential(
-            nn.Conv2d(features, out_channels, kernel_size=1), nn.Softplus())
+            nn.Conv2d(features, out_channels, kernel_size=1), nn.Softplus()
+        )
 
-    def forward(self, input_data, time_vector):
+    def forward(self, input_data, time_vector, percentile_vector):
 
         batch_size = input_data.shape[0]
         pos_emb = self.pos_emb.expand(batch_size, -1, -1, -1)
-        time_emb = self.time_emb(time_vector)
-
         x = torch.cat([input_data, pos_emb], dim=1)
-
 
         # expand feature dimensions from 4 --> n features
         x = self.conv_input(x)
@@ -487,12 +500,13 @@ class Downscale_Model(nn.Module):
         for conv_block in self.conv_hidden:
             x = conv_block(x)
 
-        # include valid date info
-        x_refined = self.film_conv(x, time_emb)
+        # time/percentile conditions
+        time_emb = self.time_emb(time_vector)
+        perc_emb = self.perc_emb(percentile_vector)
+        x = self.film_conv_time(x, time_emb)
+        x = self.film_conv_percentile(x, perc_emb)
 
-        # return final activation map
-        return self.final(x_refined)    
-
+        return self.final(x)
 
 
 def init_model(**kwargs):
