@@ -67,9 +67,9 @@ def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collat
         print("... Starting inference")
     with torch.no_grad(): 
         ncount = 0
-        for low_res_input, time_vector, grid20, percentile in input_data_loader:
+        for low_res_input, time_vector, percentile_vector, grid20, percentile in input_data_loader:
             print(f"     Process {rank} starting")
-            output_batch = downscale_model(low_res_input, time_vector)
+            output_batch = downscale_model(low_res_input, time_vector, percentile_vector)
             per_list = percentile.tolist()
             for out in range(len(output_batch)):
                 print(f"     ... {per_list[out]}th percentile downscaled.")
@@ -77,7 +77,7 @@ def worker_fn(rank: int, world_size: int, os_vars: list, para_vars: list, collat
                 # get QPF by multiplying downscale tensor by 20km resolution QPF
                 # also crop to CONUS size to get rid of padded pixels
                 collate_outputs[this_per, 0] = torch.expm1(output_batch[out].squeeze(0).squeeze(0)[grid_padding:ny+grid_padding, :nx]) * grid20[out]
-                collat_outputs[this_per, 1] = grid20[out]
+                collate_outputs[this_per, 1] = grid20[out]
                 ncount += 1
 
     dist.destroy_process_group()

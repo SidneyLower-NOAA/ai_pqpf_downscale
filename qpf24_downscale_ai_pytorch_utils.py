@@ -165,7 +165,7 @@ class xr_to_tensor(torch.utils.data.Dataset):
 
         padded_features = pad_grid(combined_features, add_pixels=self.grid_padding)
 
-        return padded_features, time_vector, percentile_vector interp20_to_2p5, percentile
+        return padded_features, time_vector, percentile_vector, interp20_to_2p5, percentile
 
 
 # Write out to Zarr
@@ -186,10 +186,10 @@ def write_high_res_ds(
 
 
     # smooth light precip
-    FIXblend=os.getenv("FIXblend")
-    terrain_file=FIXblend+'/precip/blend.precip_const.co.2p5.nc'
-    terrain_ds = xr.open_dataset(terrain_file)
-    terrain = terrain_ds.terrain.values
+    #FIXblend=os.getenv("FIXblend")
+    #terrain_file=FIXblend+'/precip/blend.precip_const.co.2p5.nc'
+    #terrain_ds = xr.open_dataset(terrain_file)
+    #terrain = terrain_ds.terrain.values
     
     output_smoothed = np.zeros_like(output_sorted)
     for grid in range(len(percentiles)):
